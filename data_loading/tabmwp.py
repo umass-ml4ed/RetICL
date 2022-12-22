@@ -1,6 +1,7 @@
-from typing import Optional
+from typing import Optional, List
 import json
 import random
+import re
 
 from data_loading.data_loading import DatasetBase, DataSample
 from models.retriever import Retriever
@@ -43,3 +44,25 @@ class TabMWPDataset(DatasetBase):
             "label": f"{solution} The answer is {answer}.",
             "meta_data": sample,
         }
+
+def extract_prediction(output: str, options: List[str]):
+    # $\\frac{16}{95}$ -> 16/95
+    output = re.sub(r"\$?\\frac\{([\d\.\,\-]+)\}\{([\d\.\,]+)\}\$?", r"\1/\2", output)
+    output = re.sub(r"(?<![AP]\.M)\.$", "", output)
+    output = re.sub(r"(?<=\d)[\=](?=[\-\$\d])", " = ", output)
+    output = re.sub(r"\u2212", "-", output)
+
+    match = re.findall(r"The answer is\s+(.*)$", output)
+    if not match:
+        return output
+
+    res = match[-1].strip()
+    if not res.endswith(".M."):
+        res = res.strip(".")
+    # Map single letter prediction to option
+    if options and re.match(r"^[a-zA-Z]$", res):
+        return next((
+            option for option_idx, option in enumerate(options)
+            if res == OPTION_INDS[option_idx]
+        ), output)
+    return res

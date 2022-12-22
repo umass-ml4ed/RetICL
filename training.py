@@ -93,4 +93,4 @@ def train_retriever(options_dict: dict):
         print(f"Epoch {epoch + 1}, Loss: {avg_loss:.4f}, Reward: {avg_reward:.4f}")
 
     torch.save(retriever.state_dict(), f"{options.model_name}.pt")
-    evaluate(run, retriever, "dev", options)
+    evaluate(run, retriever, "dev1k", options)

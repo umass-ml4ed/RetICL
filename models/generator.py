@@ -7,6 +7,14 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from models.gpt3 import gpt3_completion
 from utils import device
 
+def get_saved_cache(cache_filename: str):
+    if os.path.exists(cache_filename):
+        with open(cache_filename, encoding="utf-8") as cache_file:
+            return json.load(cache_file)
+    return {}
+
+OPENAI_BATCH_SIZE = 10
+
 class Generator:
     _cache: Dict[str, str] = {}
     _model_name = ""
@@ -24,9 +32,7 @@ class Generator:
             cls._cache_filename = f"generator_cache_{cls._gpt3_model_name}.json"
         else:
             cls._cache_filename = f"generator_cache_{cls._model_name.replace('/', '-')}.json"
-        if os.path.exists(cls._cache_filename):
-            with open(cls._cache_filename, encoding="utf-8") as cache_file:
-                cls._cache = json.load(cache_file)
+        cls._cache = get_saved_cache(cls._cache_filename)
         if cls._model_name != "gpt3":
             cls._model = AutoModelForCausalLM.from_pretrained(cls._model_name).to(device)
             cls._model.eval()
@@ -36,6 +42,9 @@ class Generator:
 
     @classmethod
     def save_cached(cls):
+        # Get updates from other processes and then save whole thing
+        temp_cache = get_saved_cache(cls._cache_filename)
+        cls._cache.update(temp_cache)
         with open(cls._cache_filename, "w", encoding="utf-8") as cache_file:
             json.dump(cls._cache, cache_file, indent=2, ensure_ascii=False)
 
@@ -72,7 +81,10 @@ class Generator:
         if cls._model_name == "gpt3":
             uncached_prompts = [prompt for prompt in prompts if prompt not in cls._cache]
             if uncached_prompts:
-                results = gpt3_completion(uncached_prompts, cls._gpt3_model_name)
+                results = []
+                for start_idx in range(0, len(uncached_prompts), OPENAI_BATCH_SIZE):
+                    batch = uncached_prompts[start_idx : start_idx + OPENAI_BATCH_SIZE]
+                    results += gpt3_completion(batch, cls._gpt3_model_name)
                 for prompt, result in zip(uncached_prompts, results):
                     cls._cache[prompt] = result
         else:
