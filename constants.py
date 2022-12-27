@@ -9,6 +9,7 @@ class SamplingMethod(Enum):
 class Reward(Enum):
     PPL = "ppl"
     EXACT = "exact"
+    EXACT_AND_BLEU = "exact_and_bleu"
 
 MODEL_TO_EMB_SIZE = {
     "all-mpnet-base-v2": 768,

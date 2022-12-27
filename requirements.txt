@@ -9,3 +9,4 @@ sentence-transformers==2.2.2
 faiss-cpu==1.7.3
 openai==0.25.0
 wandb==0.13.5
+nltk==3.7

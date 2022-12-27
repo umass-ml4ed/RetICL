@@ -4,7 +4,7 @@ from typing import Dict, List
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from models.gpt3 import gpt3_completion
+from models.gpt3 import gpt3_completion_with_batching
 from utils import device
 
 def get_saved_cache(cache_filename: str):
@@ -12,8 +12,6 @@ def get_saved_cache(cache_filename: str):
         with open(cache_filename, encoding="utf-8") as cache_file:
             return json.load(cache_file)
     return {}
-
-OPENAI_BATCH_SIZE = 10
 
 class Generator:
     _cache: Dict[str, str] = {}
@@ -51,7 +49,14 @@ class Generator:
     @classmethod
     def get_ppl(cls, prompts: List[str], labels: List[str], **kwargs):
         if cls._model_name == "gpt3":
-            raise ValueError("PPL not implemented for GPT-3")
+            import pdb; pdb.set_trace()
+            # TODO: only calculate ppl on labels
+            # TODO: scale up ppl on part with final answer
+            results = gpt3_completion_with_batching(prompts, cls._gpt3_model_name, max_tokens=0, logprobs=1, echo=True)
+            return torch.stack([
+                torch.tensor(choice["logprobs"]["token_logprobs"][1:]).mean()
+                for choice in results
+            ])
         ppls = []
         for prompt, label in zip(prompts, labels):
             # Get tokens for model input
@@ -81,12 +86,9 @@ class Generator:
         if cls._model_name == "gpt3":
             uncached_prompts = [prompt for prompt in prompts if prompt not in cls._cache]
             if uncached_prompts:
-                results = []
-                for start_idx in range(0, len(uncached_prompts), OPENAI_BATCH_SIZE):
-                    batch = uncached_prompts[start_idx : start_idx + OPENAI_BATCH_SIZE]
-                    results += gpt3_completion(batch, cls._gpt3_model_name)
+                results = gpt3_completion_with_batching(uncached_prompts, cls._gpt3_model_name)
                 for prompt, result in zip(uncached_prompts, results):
-                    cls._cache[prompt] = result
+                    cls._cache[prompt] = result["text"]
         else:
             with torch.no_grad():
                 for prompt in prompts:
@@ -100,7 +102,6 @@ class Generator:
                         input_ids,
                         pad_token_id=cls._tokenizer.eos_token_id,
                         eos_token_id=cls._newline_token,
-                        # max_length=cls._model.config.n_positions,
                         max_new_tokens=200,
                         do_sample=False,
                     )

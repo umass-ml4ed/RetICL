@@ -1,3 +1,4 @@
+from typing import List
 import time
 import os
 import openai
@@ -9,7 +10,16 @@ cur_key_idx = 0
 delay_time = 5
 decay_rate = 0.8
 
-def gpt3_completion(prompts, model="code-davinci-002", max_tokens=400):
+BATCH_SIZE = 10
+
+def gpt3_completion_with_batching(prompts: List[str], model="code-davinci-002", max_tokens=400, logprobs=None, echo=False):
+    results = []
+    for start_idx in range(0, len(prompts), BATCH_SIZE):
+        batch = prompts[start_idx : start_idx + BATCH_SIZE]
+        results += gpt3_completion(batch, model, max_tokens, logprobs, echo)
+    return results
+
+def gpt3_completion(prompts: List[str], model="code-davinci-002", max_tokens=400, logprobs=None, echo=False):
     global delay_time, cur_key_idx
     time.sleep(delay_time)
     # print(f"{delay_time:.3f}")
@@ -28,8 +38,9 @@ def gpt3_completion(prompts, model="code-davinci-002", max_tokens=400):
             top_p=1,
             frequency_penalty=0.0,
             presence_penalty=0.0,
-            n=1,
-            stop=["\n"]
+            stop=["\n"],
+            logprobs=logprobs,
+            echo=echo
         )
         delay_time *= decay_rate
     except (RateLimitError, Timeout, APIError, ServiceUnavailableError) as exc:
@@ -37,5 +48,4 @@ def gpt3_completion(prompts, model="code-davinci-002", max_tokens=400):
         delay_time *= 2
         return gpt3_completion(prompts, model, max_tokens)
 
-    # Extract text from response
-    return [choice["text"] for choice in response["choices"]]
+    return response["choices"]

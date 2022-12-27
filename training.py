@@ -2,14 +2,41 @@ import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 import wandb
+import nltk
 
 from models.retriever import Retriever
 from models.generator import Generator
-from data_loading.data_loading import Collator
+from data_loading.data_loading import Collator, CollatedBatch
 from data_loading.tabmwp import TabMWPDataset
 from evaluate import check_correct, evaluate
 from constants import SamplingMethod, Reward
 from utils import TrainOptions, device
+
+def get_rewards(batch: CollatedBatch, options: TrainOptions):
+    if options.reward in (Reward.EXACT.value, Reward.EXACT_AND_BLEU.value):
+        # Generate predictions given retrieved context and check correctness
+        predictions = Generator.generate(**batch)
+        correct = torch.Tensor([
+            1 if check_correct(src_meta_data, pred) else 0
+            for src_meta_data, pred in zip(batch["meta_data"], predictions)
+        ])
+
+        if options.reward == Reward.EXACT.value:
+            # Reward is 1 if prediction is correct, -1 otherwise
+            return 2 * correct - 1
+
+        if options.reward == Reward.EXACT_AND_BLEU.value:
+            # Calculate bleu score on the generated solutions
+            bleu = torch.Tensor([
+                nltk.translate.bleu([target], pred)
+                for pred, target in zip (predictions, batch["labels"])
+            ])
+            # Half of reward comes from bleu and other half from final correctness
+            return correct + bleu - 1
+
+    # Reward is negative perplexity assigned to label given the context
+    if options.reward == Reward.PPL.value:
+        return -Generator.get_ppl(**batch)
 
 def train_retriever(options_dict: dict):
     options = TrainOptions(options_dict)
@@ -44,17 +71,7 @@ def train_retriever(options_dict: dict):
             optimizer.zero_grad()
 
             # Calculate rewards for batch
-            if options.reward == Reward.EXACT.value:
-                # Generate predictions given retrieved context
-                predictions = Generator.generate(**batch)
-                # Reward is 1 if prediction is correct, -1 otherwise
-                rewards = torch.Tensor([
-                    1 if check_correct(src_meta_data, pred) else -1
-                    for src_meta_data, pred in zip(batch["meta_data"], predictions)
-                ]).to(device)
-            else:
-                # Reward is negative perplexity assigned to label given the context
-                rewards = -Generator.get_ppl(**batch)
+            rewards = get_rewards(batch, options).to(device)
 
             # Calculate returns: gamma=1 so just repeat reward over each time step
             returns = rewards.unsqueeze(1).repeat(1, max_num_examples).view(-1) # (N * L)

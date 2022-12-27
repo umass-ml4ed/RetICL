@@ -107,17 +107,18 @@ class DatasetBase(TorchDataset):
             # Get current sample
             cur_sample = self.data[index]
 
-            # Either sampling from original dataset or separate corpus
-            indices = list(range(len(self.corpus)))
-            corp_eq_data = id(self.corpus) == id(self.data)
-            if corp_eq_data:
-                indices.pop(index)
-
             # Initialize context
             prompt = ""
             examples: List[DataSample] = []
+            used_idxs: List[int] = []
+            # Either sampling from original dataset or separate corpus
+            corp_eq_data = id(self.corpus) == id(self.data)
+            if corp_eq_data:
+                used_idxs.append(index)
             # Group of examples to draw from when doing random sampling
-            random_example_idxs = random.sample(indices, self.options.num_examples)
+            random_example_idxs = np.array(random.sample(range(len(self.corpus)), self.options.num_examples + 1))
+            if corp_eq_data:
+                random_example_idxs = random_example_idxs[random_example_idxs != index]
             # Group of examples to draw from when doing similarity sampling
             if self.options.method == SamplingMethod.SIMILARITY.value:
                 top_neighbor_indices = self.index.search(
@@ -146,14 +147,12 @@ class DatasetBase(TorchDataset):
                             current_sample_encoding=cur_sample["context_encoding"],
                             example_encodings=example_encodings,
                         )
-                        top_2_examples = self.index.search(qv.unsqueeze(0).cpu().numpy(), 2)[1][0]
-                        # Don't pick current sample if sampling from dataset
-                        if corp_eq_data and top_2_examples[0] == index:
-                            example_idx = top_2_examples[1]
-                        else:
-                            example_idx = top_2_examples[0]
+                        top_examples = self.index.search(qv.unsqueeze(0).cpu().numpy(), 1 + len(used_idxs))[1][0]
+                        for used_idx in used_idxs:
+                            top_examples = top_examples[top_examples != used_idx]
+                        example_idx = top_examples[0]
                     else:
-                        example_idx = random_example_idxs[len(examples)]
+                        example_idx = random_example_idxs[0]
                 elif self.options.method == SamplingMethod.PG.value:
                     # Policy Gradient: sample from approximate policy at current state
                     qv = self.retriever.get_query_vector(
@@ -166,15 +165,18 @@ class DatasetBase(TorchDataset):
                     else:
                         # Get set of examples to sample from; either top k or full corpus
                         if self.options.top_k:
-                            top_k_indices = self.index.search(qv.unsqueeze(0).cpu().numpy(), self.options.top_k + 1)[1][0]
+                            top_k_indices = self.index.search(
+                                qv.unsqueeze(0).cpu().numpy(),
+                                self.options.top_k + len(used_idxs)
+                            )[1][0]
                         else:
                             top_k_indices = np.arange(len(self.corpus))
-                        # Remove current sample if sampling from dataset
-                        if corp_eq_data:
-                            top_k_indices = top_k_indices[top_k_indices != index]
-                        if self.options.top_k and len(top_k_indices) > self.options.top_k:
-                            top_k_indices = top_k_indices[:-1]
-                        # Sample from approximate policy
+                        # Filter out used indices and adjust size of action space
+                        for used_idx in used_idxs:
+                            top_k_indices = top_k_indices[top_k_indices != used_idx]
+                        if self.options.top_k:
+                            top_k_indices = top_k_indices[:self.options.top_k]
+                        # Sample from policy
                         top_k_vecs = self.encoding_matrix[top_k_indices]
                         pi_cur = torch.softmax(torch.matmul(qv, top_k_vecs.T), dim=0)
                         local_example_idx = torch.multinomial(pi_cur, 1)
@@ -183,9 +185,13 @@ class DatasetBase(TorchDataset):
                         policy_example_indices.append(local_example_idx)
                         example_idx = top_k_indices[local_example_idx]
                 elif self.options.method == SamplingMethod.RANDOM.value:
-                    example_idx = random_example_idxs[len(examples)]
+                    example_idx = random_example_idxs[0]
                 elif self.options.method == SamplingMethod.SIMILARITY.value:
                     example_idx = top_neighbor_indices[len(examples)]
+
+                # Exclude current example from future selections
+                used_idxs.append(example_idx)
+                random_example_idxs = random_example_idxs[random_example_idxs != example_idx]
 
                 # Add retrieved example to the context
                 example = self.corpus[example_idx]
