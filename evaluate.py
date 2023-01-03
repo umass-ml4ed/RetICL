@@ -9,24 +9,29 @@ import numpy as np
 from models.retriever import Retriever
 from models.generator import Generator
 from data_loading.data_loading import Collator
-from data_loading.tabmwp import TabMWPDataset, extract_prediction
-from promptPG.utilities import normalize_answer
-from constants import OPTION_INDS
+from data_loading.tabmwp import TabMWPDataset, tabmwp_check_correct
+from data_loading.gsm8k import GSM8KDataset, gsm8k_check_correct
+from constants import Datasets
 from utils import TrainOptions, device
 
-def check_correct(src_meta_data: dict, pred_text: str, forgiving: bool = False):
-    # pred = extract_prediction(pred_text, src_meta_data["choices"], OPTION_INDS, forgiving)
-    pred = extract_prediction(pred_text, src_meta_data["choices"])
-    pred_norm = normalize_answer(pred, src_meta_data["unit"])
-    label_norm = normalize_answer(src_meta_data["answer"], src_meta_data["unit"])
-    return pred_norm.lower() == label_norm.lower()
+def check_correct(src_meta_data: dict, pred_text: str, options: TrainOptions):
+    if options.dataset == Datasets.TABMWP.value:
+        return tabmwp_check_correct(src_meta_data, pred_text)
+    elif options.dataset == Datasets.GSM8K.value:
+        return gsm8k_check_correct(src_meta_data, pred_text)
+    raise Exception(f"Dataset {options.dataset} not supported!")
 
 def evaluate(run, retriever: Retriever, split: str, options: TrainOptions):
     if not run and options.wandb:
         run = wandb.init(project="reticl", config=options.as_dict())
     if retriever:
         retriever.eval()
-    dataset = TabMWPDataset(split, retriever, options)
+    if options.dataset == Datasets.TABMWP.value:
+        dataset = TabMWPDataset(split, retriever, options)
+    elif options.dataset == Datasets.GSM8K.value:
+        dataset = GSM8KDataset(split, retriever, options)
+    else:
+        raise Exception(f"Dataset {options.dataset} not supported!")
     dataset.set_greedy(True) # Use greedy sampling for policy-based example retrieval
     data_loader = DataLoader(
         dataset,
@@ -45,27 +50,32 @@ def evaluate(run, retriever: Retriever, split: str, options: TrainOptions):
         meta_datas += batch["meta_data"]
         preds += Generator.generate(**batch)
 
-    correct = np.array([check_correct(meta_data, pred, True) for meta_data, pred in zip(meta_datas, preds)])
+    correct = np.array([check_correct(meta_data, pred, options) for meta_data, pred in zip(meta_datas, preds)])
     acc = correct.mean() * 100
-    mc_acc = correct[[meta_data["ques_type"] == "multi_choice" for meta_data in meta_datas]].mean() * 100
-    free_acc = correct[[meta_data["ques_type"] == "free_text" for meta_data in meta_datas]].mean() * 100
-    print(f"Accuracy: {acc:.2f}, MC: {mc_acc:.2f}, Free: {free_acc:.2f}")
+    if options.dataset == Datasets.TABMWP.value:
+        mc_acc = correct[[meta_data["ques_type"] == "multi_choice" for meta_data in meta_datas]].mean() * 100
+        free_acc = correct[[meta_data["ques_type"] == "free_text" for meta_data in meta_datas]].mean() * 100
+        print(f"Accuracy: {acc:.2f}, MC: {mc_acc:.2f}, Free: {free_acc:.2f}")
+    else:
+        print(f"Accuracy: {acc:.2f}")
     if run:
         run.config.eval_set = split
         run.summary["accuracy"] = acc
-        run.summary["mc_accuracy"] = mc_acc
-        run.summary["free_accuracy"] = free_acc
+        if options.dataset == Datasets.TABMWP.value:
+            run.summary["mc_accuracy"] = mc_acc
+            run.summary["free_accuracy"] = free_acc
 
     model_name = options.model_name if options.model_name else\
         f"{options.method}_{options.generator_model}" + (f"_{options.gpt3_model}" if options.generator_model == "gpt3" else "")
-    out_filename = f"results_{split}_{model_name}.csv"
+    out_filename = f"results_{options.dataset}_{split}_{model_name}.csv"
     df = pandas.DataFrame({
         "prompt": prompts,
         "label": labels,
         "pred": preds,
         "correct": correct,
-        "type": [meta_data["ques_type"] for meta_data in meta_datas],
     })
+    if options.dataset == Datasets.TABMWP.value:
+        df["type"] = [meta_data["ques_type"] for meta_data in meta_datas]
     df.to_csv(out_filename)
 
 def evaluate_reticl(options_dict: dict, split: str="dev"):
@@ -77,12 +87,16 @@ def evaluate_reticl(options_dict: dict, split: str="dev"):
         retriever = None
     evaluate(None, retriever, split, options)
 
-def error_analysis(group_str: str, result_file_1: str, result_file_2: str):
+def answer_missing(df: pandas.DataFrame, dataset: str):
+    inidcator = "The answer is " if dataset == Datasets.TABMWP.value else "#### "
+    return (len(df) - df["pred"].str.contains(inidcator).sum()) / len(df)
+
+def error_analysis(group_str: str, result_file_1: str, result_file_2: str, arg_dict: dict):
     num_examples = 10
     df_1 = pandas.read_csv(result_file_1)
     df_2 = pandas.read_csv(result_file_2)
-    print("Pct left missing answer:", (len(df_1) - df_1["pred"].str.contains("The answer is").sum()) / len(df_1))
-    print("Pct right missing answer:", (len(df_2) - df_2["pred"].str.contains("The answer is").sum()) / len(df_2))
+    print("Pct left missing answer:", answer_missing(df_1, arg_dict["dataset"]))
+    print("Pct right missing answer:", answer_missing(df_2, arg_dict["dataset"]))
     # group = {
     #     "left": df_1["correct"] & ~df_2["correct"],
     #     "right": ~df_1["correct"] & df_2["correct"],

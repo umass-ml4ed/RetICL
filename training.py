@@ -8,8 +8,9 @@ from models.retriever import Retriever
 from models.generator import Generator
 from data_loading.data_loading import Collator, CollatedBatch
 from data_loading.tabmwp import TabMWPDataset
+from data_loading.gsm8k import GSM8KDataset
 from evaluate import check_correct, evaluate
-from constants import SamplingMethod, Reward
+from constants import Datasets, SamplingMethod, Reward
 from utils import TrainOptions, device
 
 def get_rewards(batch: CollatedBatch, options: TrainOptions):
@@ -17,7 +18,7 @@ def get_rewards(batch: CollatedBatch, options: TrainOptions):
         # Generate predictions given retrieved context and check correctness
         predictions = Generator.generate(**batch)
         correct = torch.Tensor([
-            1 if check_correct(src_meta_data, pred) else 0
+            1 if check_correct(src_meta_data, pred, options) else 0
             for src_meta_data, pred in zip(batch["meta_data"], predictions)
         ])
 
@@ -46,7 +47,12 @@ def train_retriever(options_dict: dict):
         run = None
     retriever = Retriever(options).to(device)
     retriever.train()
-    dataset = TabMWPDataset("train", retriever, options)
+    if options.dataset == Datasets.TABMWP.value:
+        dataset = TabMWPDataset("train", retriever, options)
+    elif options.dataset == Datasets.GSM8K.value:
+        dataset = GSM8KDataset("train", retriever, options)
+    else:
+        raise Exception(f"Dataset {options.dataset} not supported!")
     data_loader = DataLoader(
         dataset,
         collate_fn=Collator(),

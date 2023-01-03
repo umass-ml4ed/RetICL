@@ -6,6 +6,7 @@ import re
 from data_loading.data_loading import DatasetBase, DataSample
 from models.retriever import Retriever
 from promptPG.base_prompt import get_table_text, get_question_text, get_answer, get_solution_text
+from promptPG.utilities import normalize_answer
 from constants import OPTION_INDS
 from utils import TrainOptions
 
@@ -66,3 +67,9 @@ def extract_prediction(output: str, options: List[str]):
             if res == OPTION_INDS[option_idx]
         ), output)
     return res
+
+def tabmwp_check_correct(src_meta_data: dict, pred_text: str):
+    pred = extract_prediction(pred_text, src_meta_data["choices"])
+    pred_norm = normalize_answer(pred, src_meta_data["unit"])
+    label_norm = normalize_answer(src_meta_data["answer"], src_meta_data["unit"])
+    return pred_norm.lower() == label_norm.lower()

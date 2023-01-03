@@ -2,7 +2,7 @@ from typing import List
 import time
 import os
 import openai
-from openai.error import RateLimitError, Timeout, APIError, ServiceUnavailableError
+from openai.error import RateLimitError, Timeout, APIError, ServiceUnavailableError, APIConnectionError
 
 api_keys = os.getenv("OPENAI_API_KEYS").split(",")
 cur_key_idx = 0
@@ -43,7 +43,7 @@ def gpt3_completion(prompts: List[str], model="code-davinci-002", max_tokens=400
             echo=echo
         )
         delay_time *= decay_rate
-    except (RateLimitError, Timeout, APIError, ServiceUnavailableError) as exc:
+    except (RateLimitError, Timeout, APIError, ServiceUnavailableError, APIConnectionError) as exc:
         # print(exc)
         delay_time *= 2
         return gpt3_completion(prompts, model, max_tokens)

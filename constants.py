@@ -1,5 +1,9 @@
 from enum import Enum
 
+class Datasets(Enum):
+    TABMWP = "tabmwp"
+    GSM8K = "gsm8k"
+
 class SamplingMethod(Enum):
     RANDOM = "random"
     SIMILARITY = "sim"
