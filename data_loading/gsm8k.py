@@ -32,6 +32,8 @@ class GSM8KDataset(DatasetBase):
                 data = val_data
             else:
                 data = get_data(split)
+            # TODO: for not full corpus, should we use the same corpus for testing as we did for training?
+            # corpus = train_data
             if options.corpus_size:
                 corpus = random.Random(221).sample(train_data, options.corpus_size)
             else:

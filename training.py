@@ -1,5 +1,6 @@
 import torch
 from torch.utils.data import DataLoader
+import torch.nn.functional as F
 from tqdm import tqdm
 import wandb
 import nltk
@@ -61,10 +62,12 @@ def train_retriever(options_dict: dict):
         drop_last=False
     )
     optimizer = torch.optim.AdamW(retriever.parameters(), lr=options.lr)
+    torch.autograd.set_detect_anomaly(True)
     print("Training...")
     for epoch in range(options.epochs):
         total_reward = 0
         total_loss = 0
+        previous_model = None
 
         # Update epsilon if we're doing epsilon-greedy sampling
         if options.method == SamplingMethod.MCC.value:
@@ -83,7 +86,7 @@ def train_retriever(options_dict: dict):
             returns = rewards.unsqueeze(1).repeat(1, max_num_examples).view(-1) # (N * L)
 
             # Get activations on current examples from retriever
-            activations = retriever(**batch)
+            activations, value_estimates = retriever(**batch)
 
             # Calculate loss and backprop
             loss_mask = torch.arange(max_num_examples).expand(batch_size, -1) >= batch["num_examples"].unsqueeze(1)
@@ -91,7 +94,7 @@ def train_retriever(options_dict: dict):
             if options.method == SamplingMethod.MCC.value:
                 loss_fn = torch.nn.MSELoss(reduction="none")
                 loss = loss_fn(activations, returns)
-            else:
+            elif options.method == SamplingMethod.PG.value:
                 # Derive GD loss function from REINFORCE update rule:
                 # REINFORCE: param = param + lr * G * grad(log(pi[a]))
                 # GD: param = param - lr * grad(loss)
@@ -102,6 +105,48 @@ def train_retriever(options_dict: dict):
                 loss_fn = torch.nn.CrossEntropyLoss(reduction="none")
                 loss = loss_fn(activations, batch["policy_example_indices"].view(-1))
                 loss = loss * returns.view(-1)
+            elif options.method == SamplingMethod.RWB.value:
+                pg_loss_fn = torch.nn.CrossEntropyLoss(reduction="none")
+                pg_loss = pg_loss_fn(activations, batch["policy_example_indices"].view(-1))
+                pg_loss = pg_loss * (returns.view(-1) - value_estimates.detach()) # Don't differentiate w.r.t. baseline
+                val_loss = torch.nn.MSELoss(reduction="none")(value_estimates, returns)
+                loss = pg_loss + options.v_coef * val_loss
+            elif options.method == SamplingMethod.PPO.value:
+                # Get policy ratio
+                if not previous_model:
+                    ratio = torch.ones((batch_size * max_num_examples)).to(device)
+                    previous_model = Retriever(options).to(device)
+                else:
+                    with torch.no_grad():
+                        pi_old_activations, _ = previous_model(**batch)
+                    cur_policy_probs = torch.softmax(activations, dim=-1)[torch.arange(batch_size * max_num_examples), batch["policy_example_indices"].view(-1)]
+                    old_policy_probs = torch.softmax(pi_old_activations, dim=-1)[torch.arange(batch_size * max_num_examples), batch["policy_example_indices"].view(-1)]
+                    ratio = cur_policy_probs / old_policy_probs
+                # Copy model for next iteration
+                previous_model.load_state_dict(retriever.state_dict())
+
+                # Get estimated advantage - using one-step TD error
+                # Append 0 to value estimates for terminal state
+                v_t = F.pad(value_estimates.detach().view(batch_size, -1), (0, 1))
+                # Per-example reward is 0 except for final example
+                r_t = F.pad(rewards.unsqueeze(1), (max_num_examples - 1, 0))
+                # TD error: r_t + v_(t+1) - v_t
+                td_err = (r_t + v_t[:, 1:] - v_t[:, :-1]).view(-1)
+
+                # Get clip loss
+                clip_loss = -torch.min(ratio * td_err, torch.clip(ratio, 0.8, 1.2) * td_err)
+
+                # Get value function loss
+                val_loss = torch.nn.MSELoss(reduction="none")(value_estimates, returns)
+
+                # Get entropy loss - encourages exploration by flattening action distribution
+                # entropy_loss = -torch.log(torch.softmax(activations, dim=-1)).mean()
+
+                # Get final loss
+                # loss = clip_loss + options.v_coef * val_loss + options.e_coef * entropy_loss
+                loss = clip_loss + options.v_coef * val_loss
+            else:
+                raise Exception(f"Method {options.method} not supported!")
             loss[loss_mask] = 0
             loss.mean().backward()
             optimizer.step()

@@ -8,6 +8,7 @@ from constants import MODEL_TO_EMB_SIZE
 class Retriever(nn.Module):
     def __init__(self, options: TrainOptions):
         super().__init__()
+        self.options = options
         self.emb_size = MODEL_TO_EMB_SIZE[options.encoder_model]
         self.rnn = nn.GRU(self.emb_size, options.hidden_size, batch_first=True)
         self.h_0_transform = nn.Linear(self.emb_size, options.hidden_size)
@@ -16,6 +17,7 @@ class Retriever(nn.Module):
         init_bound = 1 / (options.hidden_size ** 0.5)
         nn.init.uniform_(self.bilinear, -init_bound, init_bound)
         self.bias = nn.Parameter(torch.zeros((1)))
+        self.value_fn_estimator = nn.Linear(options.hidden_size, 1)
 
     def forward(self, current_sample_encodings: torch.Tensor, example_encodings: torch.Tensor,
                 top_k_example_encodings: Optional[torch.Tensor] = None, **kwargs):
@@ -39,7 +41,12 @@ class Retriever(nn.Module):
             top_k_unrolled = top_k_example_encodings.view(-1, k, self.emb_size).transpose(1, 2) # (N * L x E x K)
             activations = torch.bmm(query_vectors, top_k_unrolled) + self.bias # (N * L x 1 x K)
             activations = activations.squeeze() # (N * L x K)
-        return activations
+            activations /= self.options.temp
+            # TODO: mask out activations of used_idxs (prior batch policy_example_idxs)
+        # Compute value estimates for baseline
+        value_estimates = self.value_fn_estimator(latent_states).view(-1) # (N * L)
+
+        return activations, value_estimates
 
     def get_query_vector(self, current_sample_encoding: torch.Tensor, example_encodings: torch.Tensor):
         h_0 = self.h_0_transform(current_sample_encoding) # Initial state comes from current sample
@@ -48,4 +55,4 @@ class Retriever(nn.Module):
         else:
             _, h_t = self.rnn(example_encodings, h_0.unsqueeze(0)) # Get latent state for last example in sequence
             h_t = h_t.squeeze(0)
-        return torch.matmul(h_t, self.bilinear)
+        return torch.matmul(h_t, self.bilinear) / self.options.temp

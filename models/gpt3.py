@@ -44,8 +44,8 @@ def gpt3_completion(prompts: List[str], model="code-davinci-002", max_tokens=400
         )
         delay_time *= decay_rate
     except (RateLimitError, Timeout, APIError, ServiceUnavailableError, APIConnectionError) as exc:
-        # print(exc)
-        delay_time *= 2
+        # print(openai.api_key, exc)
+        delay_time = min(delay_time * 2, 30)
         return gpt3_completion(prompts, model, max_tokens)
 
     return response["choices"]

@@ -9,6 +9,8 @@ class SamplingMethod(Enum):
     SIMILARITY = "sim"
     MCC = "mcc"
     PG = "pg"
+    RWB = "rwb"
+    PPO = "ppo"
 
 class Reward(Enum):
     PPL = "ppl"

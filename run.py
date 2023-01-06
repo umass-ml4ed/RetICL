@@ -45,6 +45,9 @@ def main():
     parser.add_argument("--reward", type=str, choices=[reward.value for reward in Reward], help="Reward function")
     parser.add_argument("--encoder_model", type=str, choices=MODEL_TO_EMB_SIZE.keys(), help="Pre-trained S-BERT model for sample encoding")
     parser.add_argument("--hidden_size", type=int, help="Hidden size for RetICL RNN")
+    parser.add_argument("--temp", type=float, help="Temperature for activation softmax")
+    parser.add_argument("--v_coef", type=float, help="Coefficient for value loss")
+    parser.add_argument("--e_coef", type=float, help="Coefficient for entropy loss")
 
     args = parser.parse_args()
     arg_dict = {arg: val for arg, val in vars(args).items() if val is not None}
