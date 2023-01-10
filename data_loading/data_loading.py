@@ -29,7 +29,7 @@ class ICLSample(TypedDict):
     current_sample_encoding: torch.Tensor
     example_encodings: torch.Tensor
     # For PG version of model
-    top_k_example_encodings: torch.Tensor
+    all_example_encodings: torch.Tensor
     policy_example_indices: torch.Tensor
 
 class CollatedBatch(TypedDict):
@@ -42,7 +42,7 @@ class CollatedBatch(TypedDict):
     example_encodings: torch.Tensor
     num_examples: torch.Tensor
     # For PG version of model
-    top_k_example_encodings: torch.Tensor
+    all_example_encodings: torch.Tensor
     policy_example_indices: torch.Tensor
 
 class DatasetBase(TorchDataset):
@@ -139,13 +139,13 @@ class DatasetBase(TorchDataset):
                 example_encodings = None
             else:
                 example_encodings = torch.empty((0, self.emb_size)).to(device)
-            sample_from_policy = self.options.method in (SamplingMethod.PG.value, SamplingMethod.RWB.value, SamplingMethod.PPO.value)
-            if sample_from_policy:
-                k = self.options.top_k or len(self.corpus) - (1 if corp_eq_data else 0)
-                top_k_example_encodings = torch.empty((0, k, self.emb_size)).to(device)
+            sample_from_policy = self.options.method in (
+                SamplingMethod.PG.value, SamplingMethod.RWB.value, SamplingMethod.AC.value, SamplingMethod.PPO.value)
+            if sample_from_policy and not self.greedy:
+                all_example_encodings = torch.empty((0, len(self.corpus), self.emb_size)).to(device)
                 policy_example_indices: List[int] = []
             else:
-                top_k_example_encodings = None
+                all_example_encodings = None
                 policy_example_indices = None
 
             # Retrieve examples until context is full
@@ -161,7 +161,7 @@ class DatasetBase(TorchDataset):
                     else:
                         example_idx = random_example_idxs[0]
                 elif sample_from_policy:
-                    # Policy Gradient: sample from approximate policy at current state
+                    # Policy Gradient: sample from policy at current state
                     qv = self.retriever.get_query_vector(
                         current_sample_encoding=cur_sample["context_encoding"],
                         example_encodings=example_encodings,
@@ -169,24 +169,19 @@ class DatasetBase(TorchDataset):
                     if self.greedy:
                         example_idx = self._get_top_unused_example(qv, used_idxs)
                     else:
-                        # Get set of examples to sample from; either top k or full corpus
-                        if self.options.top_k:
-                            top_k_indices = self.index.search(
-                                qv.unsqueeze(0).cpu().numpy(),
-                                self.options.top_k
-                            )[1][0]
-                        else:
-                            top_k_indices = np.arange(len(self.corpus))
                         # Randomly sample an example from the policy
-                        top_k_vecs = self.encoding_matrix[top_k_indices]
-                        activations = torch.matmul(qv, top_k_vecs.T)
+                        activations = torch.matmul(qv, self.encoding_matrix.T)
                         activations[used_idxs] = -torch.inf
+                        if self.options.top_k:
+                            _, top_k_act_idxs = torch.topk(activations, self.options.top_k)
+                            new_activations = torch.full_like(activations, -torch.inf)
+                            new_activations[top_k_act_idxs] = activations[top_k_act_idxs]
+                            activations = new_activations
                         pi_cur = torch.softmax(activations, dim=0)
-                        local_example_idx = torch.multinomial(pi_cur, 1)
+                        example_idx = torch.multinomial(pi_cur, 1)
                         # Add example and distribution to running lists
-                        top_k_example_encodings = torch.cat([top_k_example_encodings, top_k_vecs.unsqueeze(0)], dim=0)
-                        policy_example_indices.append(local_example_idx)
-                        example_idx = top_k_indices[local_example_idx]
+                        all_example_encodings = torch.cat([all_example_encodings, self.encoding_matrix.unsqueeze(0)], dim=0)
+                        policy_example_indices.append(example_idx)
                 elif self.options.method == SamplingMethod.RANDOM.value:
                     example_idx = random_example_idxs[0]
                 elif self.options.method == SamplingMethod.SIMILARITY.value:
@@ -217,7 +212,7 @@ class DatasetBase(TorchDataset):
             "current_sample_encoding": cur_sample.get("context_encoding"),
             "example_encodings": example_encodings,
             "policy_example_indices": policy_example_indices,
-            "top_k_example_encodings": top_k_example_encodings,
+            "all_example_encodings": all_example_encodings,
         }
 
     def __len__(self):
@@ -243,8 +238,8 @@ class Collator():
                 [torch.LongTensor(sample["policy_example_indices"]) for sample in batch],
                 batch_first=True
             ).to(device) if batch[0]["policy_example_indices"] is not None else None,
-            "top_k_example_encodings": pad_sequence(
-                [sample["top_k_example_encodings"] for sample in batch],
+            "all_example_encodings": pad_sequence(
+                [sample["all_example_encodings"] for sample in batch],
                 batch_first=True
-            ).to(device) if batch[0]["top_k_example_encodings"] is not None else None,
+            ).to(device) if batch[0]["all_example_encodings"] is not None else None,
         }

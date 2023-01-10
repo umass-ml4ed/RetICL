@@ -29,9 +29,11 @@ class TabMWPDataset(DatasetBase):
             # Get evaluation samples from split and corpus from train set
             if split == "dev":
                 data = get_data("dev", 100)
+            elif split == "dev500":
+                data = get_data("dev", 500)
             else:
                 data = get_data(split)
-            corpus = get_data("train", options.corpus_size)
+            corpus = get_data("train")
         super().__init__(data, corpus, retriever, options)
 
     def process_sample(self, sample) -> DataSample:

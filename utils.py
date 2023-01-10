@@ -37,6 +37,7 @@ class TrainOptions:
         self.top_k: int = options_dict.get("top_k", 0)
         self.reward: str = options_dict.get("reward", Reward.EXACT.value)
         self.hidden_size: int = options_dict.get("hidden_size", 100)
+        self.dropout: float = options_dict.get("dropout", 0.0)
         self.temp: float = options_dict.get("temp", 1.0)
         self.v_coef: float = options_dict.get("v_coef", 0.5)
         self.e_coef: float = options_dict.get("e_coef", 0.0)

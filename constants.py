@@ -10,6 +10,7 @@ class SamplingMethod(Enum):
     MCC = "mcc"
     PG = "pg"
     RWB = "rwb"
+    AC = "ac"
     PPO = "ppo"
 
 class Reward(Enum):

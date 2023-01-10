@@ -28,16 +28,13 @@ class GSM8KDataset(DatasetBase):
             # Get evaluation samples from split and corpus from train set
             if split == "dev":
                 data = val_data[:100]
+            elif split == "dev500":
+                data = val_data[:500]
             elif split == "dev1k":
                 data = val_data
             else:
                 data = get_data(split)
-            # TODO: for not full corpus, should we use the same corpus for testing as we did for training?
-            # corpus = train_data
-            if options.corpus_size:
-                corpus = random.Random(221).sample(train_data, options.corpus_size)
-            else:
-                corpus = train_data
+            corpus = train_data
         super().__init__(data, corpus, retriever, options)
 
     def process_sample(self, sample) -> DataSample:
