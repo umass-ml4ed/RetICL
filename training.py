@@ -117,7 +117,6 @@ def train_retriever(options_dict: dict):
                 loss_fn = torch.nn.MSELoss(reduction="none")
                 loss = loss_fn(activations, returns)
             elif options.method == SamplingMethod.PG.value:
-                # Derive GD loss function from REINFORCE update rule:
                 # REINFORCE: param = param + lr * G * grad(log(pi[a]))
                 # GD: param = param - lr * grad(loss)
                 # loss = -G * log(pi[a])
@@ -206,7 +205,7 @@ def train_retriever(options_dict: dict):
               f"Val Reward Est (S_0): {avg_val_reward_est_0:.4f}, Val Reward Est (S_T): {avg_val_reward_est_f:.4f}")
 
         # Save model with best reward on validation set
-        if best_reward is None or avg_val_reward > best_reward:
+        if best_reward is None or avg_val_reward >= best_reward:
             best_reward = avg_val_reward
             best_model.load_state_dict(retriever.state_dict())
             print("Best!")

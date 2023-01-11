@@ -20,9 +20,7 @@ class Retriever(nn.Module):
         self.bias = nn.Parameter(torch.zeros((1)))
         self.value_fn_estimator = nn.Linear(options.hidden_size, 1)
 
-    def forward(self, current_sample_encodings: torch.Tensor, example_encodings: torch.Tensor,
-                all_example_encodings: Optional[torch.Tensor] = None, policy_example_indices: Optional[torch.Tensor] = None,
-                **kwargs):
+    def get_latent_states_and_query_vectors(self, current_sample_encodings: torch.Tensor, example_encodings: torch.Tensor, **kwargs):
         # Initial state comes from current sample
         h_0 = self.h_0_transform(current_sample_encodings)
         # Get latent state for each example in the sequence
@@ -32,7 +30,16 @@ class Retriever(nn.Module):
         latent_states = self.dropout(latent_states)
         # Transform from latent space to embedding space
         query_vectors = torch.matmul(latent_states, self.bilinear) # (N x L x E)
+        return latent_states, query_vectors
+
+    def forward(self, current_sample_encodings: torch.Tensor, example_encodings: torch.Tensor,
+                all_example_encodings: Optional[torch.Tensor] = None, policy_example_indices: Optional[torch.Tensor] = None,
+                **kwargs):
+        # Run RNN and first half of bilinear
+        latent_states, query_vectors = self.get_latent_states_and_query_vectors(current_sample_encodings, example_encodings)
         query_vectors = query_vectors.view(-1, self.emb_size).unsqueeze(1) # (N * L x 1 x E)
+
+        # Compute activations
         if all_example_encodings is None:
             # Single activation per example - complete bilinear transformation
             example_encodings = example_encodings.view(-1, self.emb_size).unsqueeze(2) # (N * L x E x 1)
@@ -54,6 +61,7 @@ class Retriever(nn.Module):
                         next_example_idx,
                         policy_example_indices[:, used_example_idx]
                     ] = -torch.inf
+
         # Compute value estimates
         value_estimates = self.value_fn_estimator(latent_states).view(-1) # (N * L)
 

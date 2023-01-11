@@ -76,10 +76,6 @@ class DatasetBase(TorchDataset):
             self.emb_size = self.encoding_matrix.shape[1]
             encoding_matrix_np = self.encoding_matrix.cpu().numpy()
             self.index = faiss.IndexFlatL2(self.emb_size)
-            # quantizer = faiss.IndexFlatL2(self.emb_size)
-            # self.index = faiss.IndexIVFFlat(quantizer, self.emb_size, 100)
-            # self.index.nprobe = 10
-            # self.index.train(encoding_matrix_np)
             self.index.add(encoding_matrix_np)
 
         self.options = options

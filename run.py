@@ -3,6 +3,7 @@ import torch
 
 from training import train_retriever
 from evaluate import evaluate_reticl, error_analysis
+from analysis import visualize_latent_states
 from models.generator import GeneratorCM
 from constants import Datasets, SamplingMethod, Reward, MODEL_TO_EMB_SIZE
 from utils import initialize_seeds, device
@@ -26,6 +27,7 @@ def main():
     parser.add_argument("--train", action="store_true", help="Train RetICL retriever for sample lookup")
     parser.add_argument("--eval", type=str, help="Evaluate downstream performance, provide dataset split as argument")
     parser.add_argument("--error_analysis", nargs=3, help="Perform error analysis on result files; provide group to analyze followed by two .csv result files")
+    parser.add_argument("--viz", action="store_true", help="Visualize retriever latent states")
     # Training options
     parser.add_argument("--dataset", type=str, choices=[dataset.value for dataset in Datasets], help="Dataset to use")
     parser.add_argument("--method", type=str, choices=[method.value for method in SamplingMethod], help="Method for in-context sample retrieval")
@@ -55,6 +57,8 @@ def main():
 
     if args.error_analysis:
         error_analysis(*args.error_analysis, arg_dict)
+    if args.viz:
+        visualize_latent_states(arg_dict)
     if args.train or args.eval:
         with GeneratorCM(arg_dict): # Load/save generator prediction cache on program start/exit
             if args.train:
