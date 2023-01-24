@@ -5,7 +5,7 @@ from tqdm import tqdm
 import wandb
 import nltk
 
-from models.retriever import Retriever
+from models.retriever import retriever_model
 from models.generator import Generator
 from data_loading.data_loading import Collator, CollatedBatch
 from data_loading.tabmwp import TabMWPDataset
@@ -42,13 +42,10 @@ def get_rewards(batch: CollatedBatch, options: TrainOptions):
 
 def get_td_error(value_estimates: torch.Tensor, rewards: torch.Tensor):
     batch_size = rewards.shape[0]
-    max_num_examples = value_estimates.shape[0] // batch_size
     # Append 0 to value estimates for terminal state
     v_t = F.pad(value_estimates.detach().view(batch_size, -1), (0, 1))
-    # Per-example reward is 0 except for final example
-    r_t = F.pad(rewards.unsqueeze(1), (max_num_examples - 1, 0))
     # TD error: r_t + v_(t+1) - v_t
-    return (r_t + v_t[:, 1:] - v_t[:, :-1]).view(-1)
+    return (rewards + v_t[:, 1:] - v_t[:, :-1]).view(-1)
 
 def train_retriever(options_dict: dict):
     options = TrainOptions(options_dict)
@@ -56,7 +53,7 @@ def train_retriever(options_dict: dict):
         run = wandb.init(project="reticl", config=options.as_dict())
     else:
         run = None
-    retriever = Retriever(options).to(device)
+    retriever = retriever_model(options)
     retriever.train()
     if options.dataset == Datasets.TABMWP.value:
         dataset = TabMWPDataset("train", retriever, options)
@@ -85,11 +82,13 @@ def train_retriever(options_dict: dict):
     torch.autograd.set_detect_anomaly(True)
     print("Training...")
     previous_model = None # For PPO
-    best_model = Retriever(options).to(device)
+    best_model = retriever_model(options)
     best_reward = None
     for epoch in range(options.epochs):
         total_reward = 0
         total_loss = 0
+        train_example_set = set()
+        val_example_set = set()
 
         # Update epsilon if we're doing epsilon-greedy sampling
         if options.method == SamplingMethod.MCC.value:
@@ -101,11 +100,21 @@ def train_retriever(options_dict: dict):
             batch_size, max_num_examples = batch["example_encodings"].shape[:2]
             optimizer.zero_grad()
 
-            # Calculate rewards for batch
-            rewards = get_rewards(batch, options).to(device)
+            # Calculate rewards for batch - only applied to final example in sequence
+            rewards = get_rewards(batch, options).to(device) # (N)
+            rewards = F.pad(rewards.unsqueeze(1), (max_num_examples - 1, 0)) # (N x L)
 
-            # Calculate returns: gamma=1 so just repeat reward over each time step
-            returns = rewards.unsqueeze(1).repeat(1, max_num_examples).view(-1) # (N * L)
+            # Keep track of used examples
+            for sample_idx in range(batch_size):
+                for example_num, example_idx in enumerate(batch["policy_example_indices"][sample_idx]):
+                    # Add penalty for repeated examples
+                    # if example_idx.item() in train_example_set:
+                    #     penalty = (1 / max_num_examples) * (len(dataset) / len(dataset.corpus)) * .5
+                    #     rewards[sample_idx, example_num] -= penalty
+                    train_example_set.add(example_idx.item())
+
+            # Calculate returns with reverse cumulative sum, assume gamma=1
+            returns = torch.cumsum(rewards.flip(1), dim=1).flip(1).view(-1) # (N * L)
 
             # Get activations on current examples and value function estimates from retriever
             activations, value_estimates = retriever(**batch)
@@ -144,7 +153,7 @@ def train_retriever(options_dict: dict):
                 # Get policy ratio
                 if not previous_model:
                     ratio = torch.ones((batch_size * max_num_examples)).to(device)
-                    previous_model = Retriever(options).to(device)
+                    previous_model = retriever_model(options)
                 else:
                     with torch.no_grad():
                         pi_old_activations, _ = previous_model(**batch)
@@ -154,21 +163,26 @@ def train_retriever(options_dict: dict):
                 # Copy model for next iteration
                 previous_model.load_state_dict(retriever.state_dict())
 
-                # Get estimated advantage - using one-step TD error
-                advantage = get_td_error(value_estimates, rewards)
+                # Get one-step TD error for estimated advantage
+                td_error = get_td_error(value_estimates, rewards)
 
                 # Get clip loss
-                clip_loss = -torch.min(ratio * advantage, torch.clip(ratio, 0.8, 1.2) * advantage)
+                epsilon = 0.1
+                clip_loss = -torch.min(ratio * td_error, torch.clip(ratio, 1 - epsilon, 1 + epsilon) * td_error)
 
                 # Get value function loss
                 val_loss = torch.nn.MSELoss(reduction="none")(value_estimates, returns)
 
                 # Get entropy loss - encourages exploration by flattening action distribution
-                # entropy_loss = -torch.log(torch.softmax(activations, dim=-1).clip(1e-35)).mean()
+                entropy_loss = -torch.log(torch.softmax(activations, dim=-1).clip(1e-35)).mean()
+                # action_distros = torch.softmax(activations, dim=-1).view(batch_size, max_num_examples, -1)
+                # entropy_loss = -action_distros.var(dim=0).mean()
+                # inv_log_action_distros = torch.log(1 - action_distros)
+                # entropy_loss = -inv_log_action_distros.var(dim=0).mean()
 
                 # Get final loss
-                # loss = clip_loss + options.v_coef * val_loss + options.e_coef * entropy_loss
-                loss = clip_loss + options.v_coef * val_loss
+                loss = clip_loss + options.v_coef * val_loss + options.e_coef * entropy_loss
+                # loss = clip_loss + options.v_coef * val_loss
             else:
                 raise Exception(f"Method {options.method} not supported!")
             loss[loss_mask] = 0
@@ -178,37 +192,36 @@ def train_retriever(options_dict: dict):
             total_reward += rewards.detach().cpu().numpy().sum()
             total_loss += loss.detach().cpu().numpy().sum()
 
+        # Get average reward on validation set
         val_reward = 0
-        val_reward_est_0 = 0
-        val_reward_est_f = 0
         for batch in tqdm(val_loader):
-            # Calculate rewards for batch
+            for example_idx in batch["policy_example_indices"].view(-1):
+                val_example_set.add(example_idx.item())
+
             rewards = get_rewards(batch, options).to(device)
             val_reward += rewards.detach().cpu().numpy().sum()
-
-            # Get value function estimates from retriever
-            with torch.no_grad():
-                _, value_estimates = retriever(**batch)
-            value_estimates = value_estimates.view(batch["example_encodings"].shape[0], -1).detach().cpu().numpy()
-            val_reward_est_0 += value_estimates[:, 0].sum()
-            val_reward_est_f += value_estimates[:, -1].sum()
 
         # Report stats on current epoch
         avg_loss = total_loss / len(dataset)
         avg_reward = total_reward / len(dataset)
         avg_val_reward = val_reward / len(val_set)
-        avg_val_reward_est_0 = val_reward_est_0 / len(val_set)
-        avg_val_reward_est_f = val_reward_est_f / len(val_set)
         if run:
-            run.log({"loss": avg_loss, "reward": avg_reward, "val_reward": avg_val_reward})
+            run.log({
+                "loss": avg_loss,
+                "reward": avg_reward,
+                "val_reward": avg_val_reward,
+                "train_examples": len(train_example_set),
+                "val_examples": len(val_example_set),
+            })
         print(f"Epoch {epoch + 1}, Loss: {avg_loss:.4f}, Reward: {avg_reward:.4f}, Val Reward: {avg_val_reward:.4f}, "
-              f"Val Reward Est (S_0): {avg_val_reward_est_0:.4f}, Val Reward Est (S_T): {avg_val_reward_est_f:.4f}")
+              f"Train Examples: {len(train_example_set)}, Val Examples: {len(val_example_set)}")
 
         # Save model with best reward on validation set
-        if best_reward is None or avg_val_reward >= best_reward:
+        if best_reward is None or avg_val_reward > best_reward:
+        # if True:
             best_reward = avg_val_reward
-            best_model.load_state_dict(retriever.state_dict())
             print("Best!")
+            best_model.load_state_dict(retriever.state_dict())
 
     torch.save(best_model.state_dict(), f"{options.model_name}.pt")
     evaluate(run, best_model, "dev1k", options)

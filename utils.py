@@ -28,6 +28,7 @@ class TrainOptions:
         self.train_size: int = options_dict.get("train_size", 1000)
         self.corpus_size: int = options_dict.get("corpus_size", 0)
         self.wandb: bool = options_dict.get("wandb", False)
+        self.baseline: bool = options_dict.get("baseline", False)
         self.lr: float = options_dict.get("lr", 1e-3)
         self.epochs: int = options_dict.get("epochs", 20)
         self.batch_size: int = options_dict.get("batch_size", 20)
@@ -38,7 +39,6 @@ class TrainOptions:
         self.reward: str = options_dict.get("reward", Reward.EXACT.value)
         self.hidden_size: int = options_dict.get("hidden_size", 100)
         self.dropout: float = options_dict.get("dropout", 0.0)
-        self.temp: float = options_dict.get("temp", 1.0)
         self.v_coef: float = options_dict.get("v_coef", 0.5)
         self.e_coef: float = options_dict.get("e_coef", 0.0)
 

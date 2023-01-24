@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 from sklearn.manifold import TSNE
 from tqdm import tqdm
 
-from models.retriever import Retriever
+from models.reticl import RetICL
 from data_loading.data_loading import Collator, CollatedBatch
 from data_loading.tabmwp import TabMWPDataset
 from data_loading.gsm8k import GSM8KDataset
@@ -27,7 +27,7 @@ def visualize_latent_states(options_dict: dict):
     options = TrainOptions(options_dict)
 
     # Load model
-    retriever = Retriever(options).to(device)
+    retriever = RetICL(options).to(device)
     retriever.load_state_dict(torch.load(f"{options.model_name}.pt", map_location=device))
     retriever.eval()
 

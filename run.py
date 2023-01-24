@@ -8,9 +8,6 @@ from models.generator import GeneratorCM
 from constants import Datasets, SamplingMethod, Reward, MODEL_TO_EMB_SIZE
 from utils import initialize_seeds, device
 
-def bool_type(arg: str):
-    return False if arg == "0" else True
-
 def main():
     if device.type == "cuda":
         if torch.cuda.device_count() > 1:
@@ -19,8 +16,6 @@ def main():
             print("Running on GPU")
     else:
         print("No GPU found")
-
-    initialize_seeds(221)
 
     parser = argparse.ArgumentParser("RetICL")
     # Modes
@@ -34,7 +29,8 @@ def main():
     parser.add_argument("--model_name", type=str, help="Name of retriever model")
     parser.add_argument("--generator_model", type=str, help="Name of pre-trained model for text generation", default="gpt3") # "EleutherAI/gpt-j-6B"
     parser.add_argument("--gpt3_model", type=str, help="Specific model when using GPT-3 for generation", default="code-davinci-002")
-    parser.add_argument("--wandb", type=bool_type, help="Use Weights & Biases for logging")
+    parser.add_argument("--wandb", action="store_true", help="Use Weights & Biases for logging")
+    parser.add_argument("--baseline", action="store_true", help="Use baseline (example independent) model")
     parser.add_argument("--lr", type=float, help="Learning rate")
     parser.add_argument("--epochs", type=int, help="Number of epochs")
     parser.add_argument("--batch_size", type=int, help="Batch size")
@@ -48,12 +44,14 @@ def main():
     parser.add_argument("--encoder_model", type=str, choices=MODEL_TO_EMB_SIZE.keys(), help="Pre-trained S-BERT model for sample encoding")
     parser.add_argument("--hidden_size", type=int, help="Hidden size for RNN")
     parser.add_argument("--dropout", type=float, help="Dropout rate for RNN")
-    parser.add_argument("--temp", type=float, help="Temperature for activation softmax")
     parser.add_argument("--v_coef", type=float, help="Coefficient for value loss")
     parser.add_argument("--e_coef", type=float, help="Coefficient for entropy loss")
+    parser.add_argument("--rseed", type=int, help="Random seed", default=221)
 
     args = parser.parse_args()
     arg_dict = {arg: val for arg, val in vars(args).items() if val is not None}
+
+    initialize_seeds(args.rseed)
 
     if args.error_analysis:
         error_analysis(*args.error_analysis, arg_dict)
