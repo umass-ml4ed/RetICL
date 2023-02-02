@@ -2,14 +2,14 @@ from typing import Optional
 import torch
 from torch import nn
 
-from utils import TrainOptions
+from utils import TrainOptions, is_pg
 from constants import MODEL_TO_EMB_SIZE
 
 class RetICL(nn.Module):
     def __init__(self, options: TrainOptions):
         super().__init__()
         self.options = options
-        self.emb_size = MODEL_TO_EMB_SIZE[options.encoder_model]
+        self.emb_size = MODEL_TO_EMB_SIZE.get(options.encoder_model, 768)
         # self.rnn = nn.GRU(self.emb_size, options.hidden_size, batch_first=True)
         self.rnn = nn.RNN(self.emb_size, options.hidden_size, batch_first=True)
         self.dropout = nn.Dropout(options.dropout)
@@ -36,20 +36,16 @@ class RetICL(nn.Module):
         return latent_states, query_vectors
 
     def forward(self, current_sample_encodings: torch.Tensor, example_encodings: torch.Tensor,
-                all_example_encodings: Optional[torch.Tensor] = None, policy_example_indices: Optional[torch.Tensor] = None,
+                policy_example_indices: torch.Tensor, all_example_encodings: Optional[torch.Tensor],
                 **kwargs):
         # Run RNN and first half of bilinear
         latent_states, query_vectors = self.get_latent_states_and_query_vectors(current_sample_encodings, example_encodings)
         query_vectors = query_vectors.view(-1, self.emb_size).unsqueeze(1) # (N * L x 1 x E)
 
         # Compute activations
-        if all_example_encodings is None:
-            # Single activation per example - complete bilinear transformation
-            example_encodings = example_encodings.view(-1, self.emb_size).unsqueeze(2) # (N * L x E x 1)
-            activations = torch.bmm(query_vectors, example_encodings) + self.bias # (N * L x 1 x 1)
-            activations = activations.squeeze() # (N * L)
-        else:
+        if is_pg(self.options):
             # K activations per example - unroll and then complete bilinear transformation
+            assert all_example_encodings is not None
             batch_size, max_num_examples = example_encodings.shape[:2]
             k = all_example_encodings.shape[2]
             all_example_encodings_unrolled = all_example_encodings.view(-1, k, self.emb_size).transpose(1, 2) # (N * L x E x K)
@@ -64,6 +60,11 @@ class RetICL(nn.Module):
                         next_example_idx,
                         policy_example_indices[:, used_example_idx]
                     ] = -torch.inf
+        else:
+            # Single activation per example - complete bilinear transformation
+            example_encodings = example_encodings.view(-1, self.emb_size).unsqueeze(2) # (N * L x E x 1)
+            activations = torch.bmm(query_vectors, example_encodings) + self.bias # (N * L x 1 x 1)
+            activations = activations.squeeze() # (N * L)
 
         # Compute value estimates
         value_estimates = self.value_fn_estimator(latent_states).view(-1) # (N * L)

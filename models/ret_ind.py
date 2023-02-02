@@ -9,7 +9,7 @@ class RetInd(nn.Module):
     def __init__(self, options: TrainOptions):
         super().__init__()
         self.options = options
-        self.emb_size = MODEL_TO_EMB_SIZE[options.encoder_model]
+        self.emb_size = MODEL_TO_EMB_SIZE.get(options.encoder_model, 768)
         self.dropout = nn.Dropout(options.dropout)
         self.bilinear = nn.Parameter(torch.empty((self.emb_size, self.emb_size)))
         # Initialization follows pytorch Bilinear implementation
@@ -19,10 +19,12 @@ class RetInd(nn.Module):
         self.value_fn_estimator = nn.Linear(self.emb_size, 1)
 
     def forward(self, current_sample_encodings: torch.Tensor, example_encodings: torch.Tensor,
-                all_example_encodings: Optional[torch.Tensor], policy_example_indices: Optional[torch.Tensor],
+                policy_example_indices: torch.Tensor, all_example_encodings: Optional[torch.Tensor],
                 **kwargs):
         # First half of bilinear
         query_vectors = torch.matmul(current_sample_encodings, self.bilinear) # (N x E)
+
+        # TODO: handle non-pg algos
 
         # Compute activations
         batch_size, max_num_examples = example_encodings.shape[:2]

@@ -8,9 +8,9 @@ import numpy as np
 
 from models.retriever import Retriever, retriever_model
 from models.generator import Generator
-from data_loading.data_loading import Collator
-from data_loading.tabmwp import TabMWPDataset, tabmwp_check_correct
-from data_loading.gsm8k import GSM8KDataset, gsm8k_check_correct
+from data_loading.reticl import RetICLDataset, Collator
+from data_loading.tabmwp import tabmwp_get_data, tabmwp_process_sample, tabmwp_check_correct
+from data_loading.gsm8k import gsm8k_get_data, gsm8k_process_sample, gsm8k_check_correct
 from constants import Datasets
 from utils import TrainOptions
 
@@ -27,9 +27,9 @@ def evaluate(run, retriever: Optional[Retriever], split: str, options: TrainOpti
     if retriever:
         retriever.eval()
     if options.dataset == Datasets.TABMWP.value:
-        dataset = TabMWPDataset(split, retriever, options)
+        dataset = RetICLDataset(tabmwp_get_data, tabmwp_process_sample, split, retriever, options)
     elif options.dataset == Datasets.GSM8K.value:
-        dataset = GSM8KDataset(split, retriever, options)
+        dataset = RetICLDataset(gsm8k_get_data, gsm8k_process_sample, split, retriever, options)
     else:
         raise Exception(f"Dataset {options.dataset} not supported!")
     dataset.set_greedy(True) # Use greedy sampling for policy-based example retrieval
@@ -44,7 +44,7 @@ def evaluate(run, retriever: Optional[Retriever], split: str, options: TrainOpti
     meta_datas: List[dict] = []
     preds: List[str] = []
     example_set = set()
-    # Sample batch from dataset - example retrieval is done by __getitem__ in DatasetBase
+    # Sample batch from dataset - example retrieval is done by __getitem__ in RetICLDataset
     for batch in tqdm(data_loader):
         for example_idx in batch["policy_example_indices"].view(-1):
             example_set.add(example_idx.item())
@@ -70,7 +70,7 @@ def evaluate(run, retriever: Optional[Retriever], split: str, options: TrainOpti
             run.summary["free_accuracy"] = free_acc
 
     model_name = options.model_name if options.model_name else\
-        f"{options.method}_{options.generator_model}" + (f"_{options.gpt3_model}" if options.generator_model == "gpt3" else "")
+        f"{options.sm}_{options.generator_model}" + (f"_{options.gpt3_model}" if options.generator_model == "gpt3" else "")
     out_filename = f"results_{options.dataset}_{split}_{model_name}.csv"
     df = pandas.DataFrame({
         "prompt": prompts,

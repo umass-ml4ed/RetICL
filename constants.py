@@ -4,14 +4,24 @@ class Datasets(Enum):
     TABMWP = "tabmwp"
     GSM8K = "gsm8k"
 
-class SamplingMethod(Enum):
-    RANDOM = "random"
-    SIMILARITY = "sim"
+class EncoderModelType(Enum):
+    SBERT = "sbert"
+    BERT = "bert"
+    GPT2 = "gpt2"
+
+class RLAlgorithm(Enum):
     MCC = "mcc"
-    PG = "pg"
+    DQN = "dqn"
+    REINFORCE = "reinforce"
     RWB = "rwb"
     AC = "ac"
     PPO = "ppo"
+
+class SamplingMethod(Enum):
+    RANDOM = "random"
+    SIMILARITY = "sim"
+    EPSILON_GREEDY = "eg"
+    SOFTMAX = "softmax"
 
 class Reward(Enum):
     PPL = "ppl"

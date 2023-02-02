@@ -1,50 +1,47 @@
-from typing import Optional
+from typing import List
 import json
 import random
 import re
 
-from data_loading.data_loading import DatasetBase, DataSample
-from models.retriever import Retriever
+from data_loading.data_types import DataSample
 from utils import TrainOptions
 
-def get_data(split: str):
+def gsm8k_load_data(split: str) -> List[dict]:
     with open(f"grade-school-math/grade_school_math/data/{split}.jsonl") as data_file:
         samples = [json.loads(line) for line in data_file]
         random.Random(221).shuffle(samples)
         return samples
 
-class GSM8KDataset(DatasetBase):
-    def __init__(self, split: str, retriever: Optional[Retriever], options: TrainOptions):
-        all_train_data = get_data("train")
-        train_data, val_data = all_train_data[:-1000], all_train_data[-1000:]
-        if split == "train":
-            # Get training samples and corpus from train set
-            data = train_data[:options.train_size]
-            if options.corpus_size:
-                corpus = train_data[options.train_size : options.train_size + options.corpus_size]
-            else:
-                corpus = train_data[options.train_size:]
+def gsm8k_get_data(split: str, options: TrainOptions):
+    all_train_data = gsm8k_load_data("train")
+    train_data, val_data = all_train_data[:-1000], all_train_data[-1000:]
+    if split == "train":
+        # Get training samples and corpus from train set
+        train_size = options.train_size or len(train_data)
+        corpus_size = options.corpus_size or len(train_data) - train_size
+        data = train_data[:train_size]
+        corpus = train_data[train_size : train_size + corpus_size]
+    else:
+        # Get evaluation samples from split and corpus from train set
+        if split == "dev":
+            data = val_data[:100]
+        elif split == "dev500":
+            data = val_data[:500]
+        elif split == "dev1k":
+            data = val_data
         else:
-            # Get evaluation samples from split and corpus from train set
-            if split == "dev":
-                data = val_data[:100]
-            elif split == "dev500":
-                data = val_data[:500]
-            elif split == "dev1k":
-                data = val_data
-            else:
-                data = get_data(split)
-            corpus = train_data
-        super().__init__(data, corpus, retriever, options)
+            data = gsm8k_load_data(split)
+        corpus = train_data
+    return data, corpus
 
-    def process_sample(self, sample) -> DataSample:
-        question = sample["question"].replace("\n", "\\n")
-        answer = remove_calc_annotations(sample["answer"]).replace("\n", "\\n")
-        return {
-            "context": f"Question: {question}\nAnswer: ",
-            "label": answer,
-            "meta_data": sample,
-        }
+def gsm8k_process_sample(sample: dict) -> DataSample:
+    question = sample["question"].replace("\n", "\\n")
+    answer = remove_calc_annotations(sample["answer"]).replace("\n", "\\n")
+    return {
+        "context": f"Question: {question}\nAnswer: ",
+        "label": answer,
+        "meta_data": sample,
+    }
 
 def remove_calc_annotations(solution: str):
     result = ""

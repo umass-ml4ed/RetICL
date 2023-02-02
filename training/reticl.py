@@ -7,11 +7,11 @@ import nltk
 
 from models.retriever import retriever_model
 from models.generator import Generator
-from data_loading.data_loading import Collator, CollatedBatch
-from data_loading.tabmwp import TabMWPDataset
-from data_loading.gsm8k import GSM8KDataset
+from data_loading.reticl import RetICLDataset, Collator, CollatedBatch
+from data_loading.tabmwp import tabmwp_get_data, tabmwp_process_sample
+from data_loading.gsm8k import gsm8k_get_data, gsm8k_process_sample
 from evaluate import check_correct, evaluate
-from constants import Datasets, SamplingMethod, Reward
+from constants import Datasets, SamplingMethod, RLAlgorithm, Reward
 from utils import TrainOptions, device
 
 def get_rewards(batch: CollatedBatch, options: TrainOptions):
@@ -47,7 +47,7 @@ def get_td_error(value_estimates: torch.Tensor, rewards: torch.Tensor):
     # TD error: r_t + v_(t+1) - v_t
     return (rewards + v_t[:, 1:] - v_t[:, :-1]).view(-1)
 
-def train_retriever(options_dict: dict):
+def train_reticl(options_dict: dict):
     options = TrainOptions(options_dict)
     if options.wandb:
         run = wandb.init(project="reticl", config=options.as_dict())
@@ -56,11 +56,11 @@ def train_retriever(options_dict: dict):
     retriever = retriever_model(options)
     retriever.train()
     if options.dataset == Datasets.TABMWP.value:
-        dataset = TabMWPDataset("train", retriever, options)
-        val_set = TabMWPDataset("dev500", retriever, options)
+        dataset = RetICLDataset(tabmwp_get_data, tabmwp_process_sample, "train", retriever, options)
+        val_set = RetICLDataset(tabmwp_get_data, tabmwp_process_sample, "dev500", retriever, options)
     elif options.dataset == Datasets.GSM8K.value:
-        dataset = GSM8KDataset("train", retriever, options)
-        val_set = GSM8KDataset("dev500", retriever, options)
+        dataset = RetICLDataset(gsm8k_get_data, gsm8k_process_sample, "train", retriever, options)
+        val_set = RetICLDataset(gsm8k_get_data, gsm8k_process_sample, "dev500", retriever, options)
     else:
         raise Exception(f"Dataset {options.dataset} not supported!")
     val_set.set_greedy(True) # Use greedy retrieval for validation
@@ -78,7 +78,7 @@ def train_retriever(options_dict: dict):
         shuffle=False,
         drop_last=False
     )
-    optimizer = torch.optim.AdamW(retriever.parameters(), lr=options.lr)
+    optimizer = torch.optim.AdamW(retriever.parameters(), lr=options.lr, weight_decay=options.wd)
     torch.autograd.set_detect_anomaly(True)
     print("Training...")
     previous_model = None # For PPO
@@ -87,15 +87,16 @@ def train_retriever(options_dict: dict):
     for epoch in range(options.epochs):
         total_reward = 0
         total_loss = 0
+        total_vf_loss = 0
         train_example_set = set()
         val_example_set = set()
 
         # Update epsilon if we're doing epsilon-greedy sampling
-        if options.method == SamplingMethod.MCC.value:
+        if options.sm == SamplingMethod.EPSILON_GREEDY.value:
             dataset.update_epsilon(options.epsilon * options.epsilon_decay ** epoch)
             print("Epsilon:", dataset.epsilon)
 
-        # Sample batch from dataset - example retrieval is also done here (__getitem__ in DatasetBase)
+        # Sample batch from dataset - example retrieval is also done here (__getitem__ in RetICLDataset)
         for batch in tqdm(data_loader):
             batch_size, max_num_examples = batch["example_encodings"].shape[:2]
             optimizer.zero_grad()
@@ -122,10 +123,13 @@ def train_retriever(options_dict: dict):
             # Calculate loss and backprop
             loss_mask = torch.arange(max_num_examples).expand(batch_size, -1) >= batch["num_examples"].unsqueeze(1)
             loss_mask = loss_mask.view(-1)
-            if options.method == SamplingMethod.MCC.value:
+            vf_loss = None
+            if options.rl_algo == RLAlgorithm.MCC.value:
                 loss_fn = torch.nn.MSELoss(reduction="none")
                 loss = loss_fn(activations, returns)
-            elif options.method == SamplingMethod.PG.value:
+            elif options.rl_algo == RLAlgorithm.DQN.value:
+                pass
+            elif options.rl_algo == RLAlgorithm.REINFORCE.value:
                 # REINFORCE: param = param + lr * G * grad(log(pi[a]))
                 # GD: param = param - lr * grad(loss)
                 # loss = -G * log(pi[a])
@@ -135,21 +139,21 @@ def train_retriever(options_dict: dict):
                 loss_fn = torch.nn.CrossEntropyLoss(reduction="none")
                 loss = loss_fn(activations, batch["policy_example_indices"].view(-1))
                 loss = loss * returns.view(-1)
-            elif options.method == SamplingMethod.RWB.value:
+            elif options.rl_algo == RLAlgorithm.RWB.value:
                 pg_loss_fn = torch.nn.CrossEntropyLoss(reduction="none")
                 pg_loss = pg_loss_fn(activations, batch["policy_example_indices"].view(-1))
                 pg_loss = pg_loss * (returns.view(-1) - value_estimates.detach()) # Don't differentiate w.r.t. baseline
-                val_loss = torch.nn.MSELoss(reduction="none")(value_estimates, returns)
-                loss = pg_loss + options.v_coef * val_loss
-            elif options.method == SamplingMethod.AC.value:
+                vf_loss = torch.nn.MSELoss(reduction="none")(value_estimates, returns)
+                loss = pg_loss + options.v_coef * vf_loss
+            elif options.rl_algo == RLAlgorithm.AC.value:
                 td_error = get_td_error(value_estimates, rewards)
                 pg_loss_fn = torch.nn.CrossEntropyLoss(reduction="none")
                 pg_loss = pg_loss_fn(activations, batch["policy_example_indices"].view(-1))
                 pg_loss = pg_loss * td_error
                 # (r_t + v_(t+1) - v_t)^2 = ((r_t + v_(t+1) - v_t + v_t) - v_t)^2 = ((td_err + v_t) - v_t)^2
-                val_loss = torch.nn.MSELoss(reduction="none")(value_estimates, td_error + value_estimates.detach())
-                loss = pg_loss + options.v_coef * val_loss
-            elif options.method == SamplingMethod.PPO.value:
+                vf_loss = torch.nn.MSELoss(reduction="none")(value_estimates, td_error + value_estimates.detach())
+                loss = pg_loss + options.v_coef * vf_loss
+            elif options.rl_algo == RLAlgorithm.PPO.value:
                 # Get policy ratio
                 if not previous_model:
                     ratio = torch.ones((batch_size * max_num_examples)).to(device)
@@ -171,26 +175,29 @@ def train_retriever(options_dict: dict):
                 clip_loss = -torch.min(ratio * td_error, torch.clip(ratio, 1 - epsilon, 1 + epsilon) * td_error)
 
                 # Get value function loss
-                val_loss = torch.nn.MSELoss(reduction="none")(value_estimates, returns)
+                vf_loss = torch.nn.MSELoss(reduction="none")(value_estimates, returns)
 
-                # Get entropy loss - encourages exploration by flattening action distribution
-                entropy_loss = -torch.log(torch.softmax(activations, dim=-1).clip(1e-35)).mean()
-                # action_distros = torch.softmax(activations, dim=-1).view(batch_size, max_num_examples, -1)
-                # entropy_loss = -action_distros.var(dim=0).mean()
-                # inv_log_action_distros = torch.log(1 - action_distros)
-                # entropy_loss = -inv_log_action_distros.var(dim=0).mean()
+                # Maximize entropy - encourages exploration by flattening action distribution
+                # H_t = -sum(pi(action_probs) * log(pi(action_probs)))
+                # Take average and negate to convert to loss
+                action_distro = torch.softmax(activations, dim=-1).clip(1e-35)
+                entropy_loss = torch.sum(action_distro * torch.log(action_distro), dim=-1).mean()
+                # Normalize by maximum entropy so coefficient is independent of action space size
+                entropy_loss = entropy_loss / torch.log(torch.tensor(action_distro.shape[-1]))
 
                 # Get final loss
-                loss = clip_loss + options.v_coef * val_loss + options.e_coef * entropy_loss
-                # loss = clip_loss + options.v_coef * val_loss
+                loss = clip_loss + options.v_coef * vf_loss + options.e_coef * entropy_loss
+                # loss = clip_loss + options.v_coef * vf_loss
             else:
-                raise Exception(f"Method {options.method} not supported!")
+                raise Exception(f"Algorithm {options.rl_algo} not supported!")
             loss[loss_mask] = 0
             loss.mean().backward()
             optimizer.step()
 
             total_reward += rewards.detach().cpu().numpy().sum()
             total_loss += loss.detach().cpu().numpy().sum()
+            if vf_loss is not None:
+                total_vf_loss += vf_loss.detach().cpu().numpy().sum()
 
         # Get average reward on validation set
         val_reward = 0
@@ -208,10 +215,12 @@ def train_retriever(options_dict: dict):
         if run:
             run.log({
                 "loss": avg_loss,
+                "vf_loss": total_vf_loss / (len(dataset) * max_num_examples) if vf_loss is not None else None,
                 "reward": avg_reward,
                 "val_reward": avg_val_reward,
                 "train_examples": len(train_example_set),
                 "val_examples": len(val_example_set),
+                "epsilon": dataset.epsilon if options.sm == SamplingMethod.EPSILON_GREEDY.value else None,
             })
         print(f"Epoch {epoch + 1}, Loss: {avg_loss:.4f}, Reward: {avg_reward:.4f}, Val Reward: {avg_val_reward:.4f}, "
               f"Train Examples: {len(train_example_set)}, Val Examples: {len(val_example_set)}")

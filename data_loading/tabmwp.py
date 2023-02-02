@@ -1,52 +1,50 @@
-from typing import Optional, List
+from typing import List
 import json
 import random
 import re
 
-from data_loading.data_loading import DatasetBase, DataSample
-from models.retriever import Retriever
+from data_loading.data_types import DataSample
 from promptPG.base_prompt import get_table_text, get_question_text, get_answer, get_solution_text
 from promptPG.utilities import normalize_answer
 from constants import OPTION_INDS
 from utils import TrainOptions
 
-def get_data(split: str, samples_to_keep: int = 0):
+def tabmwp_load_data(split: str) -> List[dict]:
     with open(f"tabmwp/problems_{split}.json", encoding="utf-8") as data_file:
         samples = list(json.load(data_file).values())
-        if samples_to_keep:
-            return random.Random(221).sample(samples, samples_to_keep)
         random.Random(221).shuffle(samples)
         return samples
 
-class TabMWPDataset(DatasetBase):
-    def __init__(self, split: str, retriever: Optional[Retriever], options: TrainOptions):
-        if split == "train":
-            # Get training samples and corpus from train set
-            samples_to_keep = (options.train_size + options.corpus_size) if options.corpus_size else 0
-            all_data = get_data("train", samples_to_keep)
-            data, corpus = all_data[:options.train_size], all_data[options.train_size:]
+def tabmwp_get_data(split: str, options: TrainOptions):
+    if split == "train":
+        # Get training samples and corpus from train set
+        train_data = tabmwp_load_data("train")
+        train_size = options.train_size or len(train_data)
+        corpus_size = options.corpus_size or len(train_data) - train_size
+        data = train_data[:train_size]
+        corpus = train_data[train_size : train_size + corpus_size]
+    else:
+        # Get evaluation samples from split and corpus from train set
+        if split == "dev":
+            data = tabmwp_load_data("dev")[:100]
+        elif split == "dev500":
+            data = tabmwp_load_data("dev")[:500]
         else:
-            # Get evaluation samples from split and corpus from train set
-            if split == "dev":
-                data = get_data("dev", 100)
-            elif split == "dev500":
-                data = get_data("dev", 500)
-            else:
-                data = get_data(split)
-            corpus = get_data("train")
-        super().__init__(data, corpus, retriever, options)
+            data = tabmwp_load_data(split)
+        corpus = tabmwp_load_data("train")
+    return data, corpus
 
-    def process_sample(self, sample) -> DataSample:
-        # Prompt structure follows from PromptPG paper
-        table = get_table_text(sample)
-        question = get_question_text(sample, OPTION_INDS)
-        answer = get_answer(sample)
-        solution = get_solution_text(sample)
-        return {
-            "context": f"Table: {table}\nQuestion: {question}\nAnswer: ",
-            "label": f"{solution} The answer is {answer}.",
-            "meta_data": sample,
-        }
+def tabmwp_process_sample(sample: dict) -> DataSample:
+    # Prompt structure follows from PromptPG paper
+    table = get_table_text(sample)
+    question = get_question_text(sample, OPTION_INDS)
+    answer = get_answer(sample)
+    solution = get_solution_text(sample)
+    return {
+        "context": f"Table: {table}\nQuestion: {question}\nAnswer: ",
+        "label": f"{solution} The answer is {answer}.",
+        "meta_data": sample,
+    }
 
 def extract_prediction(output: str, options: List[str]):
     # $\\frac{16}{95}$ -> 16/95

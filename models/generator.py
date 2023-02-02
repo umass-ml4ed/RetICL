@@ -5,7 +5,7 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from models.gpt3 import gpt3_completion_with_batching
-from utils import device
+from utils import device, TrainOptions
 
 def get_saved_cache(cache_filename: str):
     if os.path.exists(cache_filename):
@@ -24,12 +24,14 @@ class Generator:
 
     @classmethod
     def load(cls, args: dict):
-        cls._model_name = args["generator_model"]
+        options = TrainOptions(args)
+        cls._model_name = options.generator_model
         if cls._model_name == "gpt3":
-            cls._gpt3_model_name = args["gpt3_model"]
-            cls._cache_filename = f"generator_cache_{cls._gpt3_model_name}.json"
+            cls._gpt3_model_name = options.gpt3_model
+            model_name = cls._gpt3_model_name
         else:
-            cls._cache_filename = f"generator_cache_{cls._model_name.replace('/', '-')}.json"
+            model_name = cls._model_name.replace('/', '-')
+        cls._cache_filename = f"generator_cache_{options.dataset}_{model_name}_ex{options.num_examples}.json"
         cls._cache = get_saved_cache(cls._cache_filename)
         if cls._model_name != "gpt3":
             cls._model = AutoModelForCausalLM.from_pretrained(cls._model_name).to(device)
