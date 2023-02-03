@@ -12,7 +12,7 @@ from data_loading.tabmwp import tabmwp_get_data, tabmwp_process_sample
 from data_loading.gsm8k import gsm8k_get_data, gsm8k_process_sample
 from evaluate import check_correct, evaluate
 from constants import Datasets, SamplingMethod, RLAlgorithm, Reward
-from utils import TrainOptions, device
+from utils import TrainOptions, device, is_pg
 
 def get_rewards(batch: CollatedBatch, options: TrainOptions):
     if options.reward in (Reward.EXACT.value, Reward.EXACT_AND_BLEU.value):
@@ -46,6 +46,13 @@ def get_td_error(value_estimates: torch.Tensor, rewards: torch.Tensor):
     v_t = F.pad(value_estimates.detach().view(batch_size, -1), (0, 1))
     # TD error: r_t + v_(t+1) - v_t
     return (rewards + v_t[:, 1:] - v_t[:, :-1]).view(-1)
+
+def get_entropy(activations: torch.Tensor):
+    # H_t = -sum(pi(action_probs) * log(pi(action_probs)))
+    action_distro = torch.softmax(activations, dim=-1).clip(1e-35)
+    entropy = -torch.sum(action_distro * torch.log(action_distro), dim=-1).mean()
+    # Normalize by maximum entropy so coefficient is independent of action space size
+    return entropy / torch.log(torch.tensor(action_distro.shape[-1]))
 
 def train_reticl(options_dict: dict):
     options = TrainOptions(options_dict)
@@ -178,15 +185,10 @@ def train_reticl(options_dict: dict):
                 vf_loss = torch.nn.MSELoss(reduction="none")(value_estimates, returns)
 
                 # Maximize entropy - encourages exploration by flattening action distribution
-                # H_t = -sum(pi(action_probs) * log(pi(action_probs)))
-                # Take average and negate to convert to loss
-                action_distro = torch.softmax(activations, dim=-1).clip(1e-35)
-                entropy_loss = torch.sum(action_distro * torch.log(action_distro), dim=-1).mean()
-                # Normalize by maximum entropy so coefficient is independent of action space size
-                entropy_loss = entropy_loss / torch.log(torch.tensor(action_distro.shape[-1]))
+                entropy = get_entropy(activations)
 
                 # Get final loss
-                loss = clip_loss + options.v_coef * vf_loss + options.e_coef * entropy_loss
+                loss = clip_loss + options.v_coef * vf_loss - options.e_coef * entropy
                 # loss = clip_loss + options.v_coef * vf_loss
             else:
                 raise Exception(f"Algorithm {options.rl_algo} not supported!")
@@ -201,6 +203,7 @@ def train_reticl(options_dict: dict):
 
         # Get average reward on validation set
         val_reward = 0
+        val_entropy = None
         for batch in tqdm(val_loader):
             for example_idx in batch["policy_example_indices"].view(-1):
                 val_example_set.add(example_idx.item())
@@ -208,18 +211,25 @@ def train_reticl(options_dict: dict):
             rewards = get_rewards(batch, options).to(device)
             val_reward += rewards.detach().cpu().numpy().sum()
 
+            if is_pg(options):
+                with torch.no_grad():
+                    activations, _ = retriever(**batch)
+                val_entropy = get_entropy(activations)
+
         # Report stats on current epoch
         avg_loss = total_loss / len(dataset)
         avg_reward = total_reward / len(dataset)
         avg_val_reward = val_reward / len(val_set)
+        avg_vf_loss = total_vf_loss / (len(dataset) * max_num_examples) if vf_loss is not None else None
         if run:
             run.log({
                 "loss": avg_loss,
-                "vf_loss": total_vf_loss / (len(dataset) * max_num_examples) if vf_loss is not None else None,
+                "vf_loss": avg_vf_loss,
                 "reward": avg_reward,
                 "val_reward": avg_val_reward,
                 "train_examples": len(train_example_set),
                 "val_examples": len(val_example_set),
+                "val_entropy": val_entropy,
                 "epsilon": dataset.epsilon if options.sm == SamplingMethod.EPSILON_GREEDY.value else None,
             })
         print(f"Epoch {epoch + 1}, Loss: {avg_loss:.4f}, Reward: {avg_reward:.4f}, Val Reward: {avg_val_reward:.4f}, "
