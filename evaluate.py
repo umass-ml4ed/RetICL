@@ -8,30 +8,18 @@ import numpy as np
 
 from models.retriever import Retriever, retriever_model
 from models.generator import Generator
-from data_loading.reticl import RetICLDataset, Collator
-from data_loading.tabmwp import tabmwp_get_data, tabmwp_process_sample, tabmwp_check_correct
-from data_loading.gsm8k import gsm8k_get_data, gsm8k_process_sample, gsm8k_check_correct
+from data_loading.data_types import GetDataFunction, ProcessDataFunction, CheckCorrectFunction
+from data_loading.reticl_dataset import RetICLDataset, Collator
 from constants import Datasets
 from utils import TrainOptions
 
-def check_correct(src_meta_data: dict, pred_text: str, options: TrainOptions):
-    if options.dataset == Datasets.TABMWP.value:
-        return tabmwp_check_correct(src_meta_data, pred_text)
-    elif options.dataset == Datasets.GSM8K.value:
-        return gsm8k_check_correct(src_meta_data, pred_text)
-    raise Exception(f"Dataset {options.dataset} not supported!")
-
-def evaluate(run, retriever: Optional[Retriever], split: str, options: TrainOptions):
+def evaluate_reticl(run, get_data: GetDataFunction, process_sample: ProcessDataFunction, check_correct: CheckCorrectFunction,
+             retriever: Optional[Retriever], split: str, options: TrainOptions):
     if not run and options.wandb:
         run = wandb.init(project="reticl", config=options.as_dict())
     if retriever:
         retriever.eval()
-    if options.dataset == Datasets.TABMWP.value:
-        dataset = RetICLDataset(tabmwp_get_data, tabmwp_process_sample, split, retriever, options)
-    elif options.dataset == Datasets.GSM8K.value:
-        dataset = RetICLDataset(gsm8k_get_data, gsm8k_process_sample, split, retriever, options)
-    else:
-        raise Exception(f"Dataset {options.dataset} not supported!")
+    dataset = RetICLDataset(get_data, process_sample, split, retriever, options)
     dataset.set_greedy(True) # Use greedy sampling for policy-based example retrieval
     data_loader = DataLoader(
         dataset,
@@ -54,7 +42,7 @@ def evaluate(run, retriever: Optional[Retriever], split: str, options: TrainOpti
         meta_datas += batch["meta_data"]
         preds += Generator.generate(**batch)
 
-    correct = np.array([check_correct(meta_data, pred, options) for meta_data, pred in zip(meta_datas, preds)])
+    correct = np.array([check_correct(meta_data, pred) for meta_data, pred in zip(meta_datas, preds)])
     acc = correct.mean() * 100
     if options.dataset == Datasets.TABMWP.value:
         mc_acc = correct[[meta_data["ques_type"] == "multi_choice" for meta_data in meta_datas]].mean() * 100
@@ -82,14 +70,15 @@ def evaluate(run, retriever: Optional[Retriever], split: str, options: TrainOpti
         df["type"] = [meta_data["ques_type"] for meta_data in meta_datas]
     df.to_csv(out_filename)
 
-def evaluate_reticl(options_dict: dict, split: str):
+def evaluate(get_data: GetDataFunction, process_sample: ProcessDataFunction, check_correct: CheckCorrectFunction,
+             split: str, options_dict: dict):
     options = TrainOptions(options_dict)
     if options.model_name:
         retriever = retriever_model(options)
         retriever.load_state_dict(torch.load(f"{options.model_name}.pt"))
     else:
         retriever = None
-    evaluate(None, retriever, split, options)
+    evaluate_reticl(None, get_data, process_sample, check_correct, retriever, split, options)
 
 def answer_missing(df: pandas.DataFrame, dataset: str):
     inidcator = "The answer is " if dataset == Datasets.TABMWP.value else "#### "

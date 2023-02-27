@@ -37,9 +37,15 @@ def gsm8k_get_data(split: str, options: TrainOptions):
 def gsm8k_process_sample(sample: dict) -> DataSample:
     question = sample["question"].replace("\n", "\\n")
     answer = remove_calc_annotations(sample["answer"]).replace("\n", "\\n")
+    answer_lines = answer.split("\\n")
     return {
-        "context": f"Question: {question}\nAnswer: ",
-        "label": answer,
+        "lm_context": f"Question: {question}\nAnswer: ",
+        "lm_label": answer,
+        "encoder_context": f"Question: {question}\nAnswer: ",
+        "encoder_label": answer,
+        # "encoder_context": f"Problem: {question}",
+        # "encoder_label": f"Full Solution: [SEP]{'[SEP]'.join(answer_lines)}",
+        # "encoder_label": f"Full Solution: {answer}",
         "meta_data": sample,
     }
 

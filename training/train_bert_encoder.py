@@ -6,10 +6,7 @@ from torch.utils.data import Dataset
 from tqdm import tqdm
 
 from data_loading.data_types import GetDataFunction, ProcessDataFunction
-from data_loading.tabmwp import tabmwp_get_data, tabmwp_process_sample
-from data_loading.gsm8k import gsm8k_get_data, gsm8k_process_sample
 from utils import device, TrainOptions
-from constants import Datasets
 
 class BERTDataset(Dataset):
     def __init__(self, get_data: GetDataFunction, process_sample: ProcessDataFunction, split: str, options: TrainOptions):
@@ -18,8 +15,8 @@ class BERTDataset(Dataset):
         self.solutions = []
         for sample in tqdm(get_data(split, options)[0]):
             sample = process_sample(sample)
-            self.problems.append(sample["context"])
-            self.solutions.append(sample["label"])
+            self.problems.append(sample["encoder_context"])
+            self.solutions.append(sample["encoder_label"])
 
     def __len__(self):
         return len(self.problems)
@@ -55,18 +52,12 @@ def compute_metrics(eval_pred):
         "accuracy": (predictions == labels).sum().item() / len(predictions)
     }
 
-def finetune_bert(options_dict: dict):
+def finetune_bert(get_data: GetDataFunction, process_sample: ProcessDataFunction, options_dict: dict):
     options = TrainOptions(options_dict)
     model = BertForNextSentencePrediction.from_pretrained("bert-base-cased").to(device)
 
-    if options.dataset == Datasets.TABMWP.value:
-        train_dataset = BERTDataset(tabmwp_get_data, tabmwp_process_sample, "train", options)
-        val_dataset = BERTDataset(tabmwp_get_data, tabmwp_process_sample, "dev1k", options)
-    elif options.dataset == Datasets.GSM8K.value:
-        train_dataset = BERTDataset(gsm8k_get_data, gsm8k_process_sample, "train", options)
-        val_dataset = BERTDataset(gsm8k_get_data, gsm8k_process_sample, "dev1k", options)
-    else:
-        raise Exception(f"Dataset {options.dataset} not supported!")
+    train_dataset = BERTDataset(get_data, process_sample, "train", options)
+    val_dataset = BERTDataset(get_data, process_sample, "dev1k", options)
 
     training_args = TrainingArguments(
         output_dir=options.model_name,

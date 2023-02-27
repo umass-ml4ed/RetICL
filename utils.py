@@ -3,7 +3,7 @@ import random
 import numpy as np
 import torch
 
-from constants import Datasets, RLAlgorithm, SamplingMethod, Reward, EncoderModelType
+from constants import Datasets, RLAlgorithm, SamplingMethod, Reward, EncoderModelType, ModelType, Init
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -26,6 +26,7 @@ class TrainOptions:
             raise Exception("Must define RL algorithm if using epsilon-greedy or softmax sampling!")
         if self.rl_algo is not None and self.sm in (SamplingMethod.RANDOM.value, SamplingMethod.SIMILARITY.value):
             raise Exception("RL algorithm not used with random or similarity sampling!")
+        self.model_type: str = options_dict.get("model_type", ModelType.RNN.value)
         self.model_name: Optional[str] = options_dict.get("model_name", None)
         self.generator_model: str = options_dict.get("generator_model", "gpt3") # "EleutherAI/gpt-j-6B"
         self.gpt3_model: str = options_dict.get("gpt3_model", "code-davinci-002")
@@ -34,15 +35,16 @@ class TrainOptions:
         self.train_size: int = options_dict.get("train_size", 1000)
         self.corpus_size: int = options_dict.get("corpus_size", 0)
         self.wandb: bool = options_dict.get("wandb", False)
-        self.baseline: bool = options_dict.get("baseline", False)
         self.lr: float = options_dict.get("lr", 1e-3)
         self.wd: float = options_dict.get("wd", 1e-2)
+        self.grad_clip: float = options_dict.get("grad_clip", 1.0)
+        self.init: str = options_dict.get("init", Init.ORTHOGONAL.value)
         self.epochs: int = options_dict.get("epochs", 20)
         self.batch_size: int = options_dict.get("batch_size", 20)
         self.grad_accum_steps: int = options_dict.get("grad_accum_steps", 1)
         self.num_examples: int = options_dict.get("num_examples", 2)
         self.epsilon: float = options_dict.get("epsilon", 0.5)
-        self.epsilon_decay: float = options_dict.get("epsilon_decay", 0.9)
+        self.expl_decay_rate: float = options_dict.get("expl_decay_rate", 1.0)
         self.top_k: int = options_dict.get("top_k", 0)
         self.reward: str = options_dict.get("reward", Reward.EXACT.value)
         self.hidden_size: int = options_dict.get("hidden_size", 100)

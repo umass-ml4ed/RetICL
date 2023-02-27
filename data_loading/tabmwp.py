@@ -41,8 +41,12 @@ def tabmwp_process_sample(sample: dict) -> DataSample:
     answer = get_answer(sample)
     solution = get_solution_text(sample)
     return {
-        "context": f"Table: {table}\nQuestion: {question}\nAnswer: ",
-        "label": f"{solution} The answer is {answer}.",
+        "lm_context": f"Table: {table}\nQuestion: {question}\nAnswer: ",
+        "lm_label": f"{solution} The answer is {answer}.",
+        "encoder_context": f"Table: {table}\nQuestion: {question}\nAnswer: ",
+        "encoder_label": f"{solution} The answer is {answer}.",
+        # "encoder_context": f"Table: {table}\nQuestion: {question}",
+        # "encoder_label": f"Answer: {solution} The answer is {answer}.",
         "meta_data": sample,
     }
 

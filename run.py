@@ -1,14 +1,26 @@
+from typing import Tuple
 import argparse
 import torch
 
-from training.reticl import train_reticl
-from training.gpt2_encoder import finetune_gpt2
-from training.bert_encoder import finetune_bert
-from evaluate import evaluate_reticl, error_analysis
+from training.train_reticl import train_reticl
+from training.train_gpt2_encoder import finetune_gpt2
+from training.train_bert_encoder import finetune_bert
+from evaluate import evaluate, error_analysis
 from analysis import visualize_representations
+from data_loading.data_types import GetDataFunction, ProcessDataFunction, CheckCorrectFunction
+from data_loading.tabmwp import tabmwp_get_data, tabmwp_process_sample, tabmwp_check_correct
+from data_loading.gsm8k import gsm8k_get_data, gsm8k_process_sample, gsm8k_check_correct
 from models.generator import GeneratorCM
-from constants import Datasets, RLAlgorithm, SamplingMethod, Reward, EncoderModelType
-from utils import initialize_seeds, device
+from constants import Datasets, RLAlgorithm, SamplingMethod, Reward, EncoderModelType, ModelType, Init
+from utils import initialize_seeds, device, TrainOptions
+
+def get_dataset_functions(options_dict: dict) -> Tuple[GetDataFunction, ProcessDataFunction, CheckCorrectFunction]:
+    options = TrainOptions(options_dict)
+    if options.dataset == Datasets.TABMWP.value:
+        return tabmwp_get_data, tabmwp_process_sample, tabmwp_check_correct
+    if options.dataset == Datasets.GSM8K.value:
+        return gsm8k_get_data, gsm8k_process_sample, gsm8k_check_correct
+    raise Exception(f"Dataset {options.dataset} not supported!")
 
 def main():
     if device.type == "cuda":
@@ -31,13 +43,15 @@ def main():
     parser.add_argument("--dataset", type=str, choices=[dataset.value for dataset in Datasets], help="Dataset to use")
     parser.add_argument("--rl_algo", type=str, choices=[algo.value for algo in RLAlgorithm], help="RL algorithm for training")
     parser.add_argument("--sm", type=str, choices=[sm.value for sm in SamplingMethod], help="Sampling method for example retrieval")
-    parser.add_argument("--model_name", type=str, help="Name of retriever model")
+    parser.add_argument("--model_type", type=str, choices=[mt.value for mt in ModelType], help="Type of RetICL model to use")
+    parser.add_argument("--model_name", type=str, help="Name of RetICL model")
     parser.add_argument("--generator_model", type=str, help="Name of pre-trained model for text generation", default="gpt3") # "EleutherAI/gpt-j-6B"
     parser.add_argument("--gpt3_model", type=str, help="Specific model when using GPT-3 for generation", default="code-davinci-002")
     parser.add_argument("--wandb", action="store_true", help="Use Weights & Biases for logging")
-    parser.add_argument("--baseline", action="store_true", help="Use baseline (example-independent) model")
     parser.add_argument("--lr", type=float, help="Learning rate")
     parser.add_argument("--wd", type=float, help="Weight decay")
+    parser.add_argument("--grad_clip", type=float, help="Gradient clipping norm total value")
+    parser.add_argument("--init", type=str, choices=[i.value for i in Init], help="Initialization method for model parameters")
     parser.add_argument("--epochs", type=int, help="Number of epochs")
     parser.add_argument("--batch_size", type=int, help="Batch size")
     parser.add_argument("--grad_accum_steps", type=int, help="Number of gradient accumulation steps for encoder fine-tuning")
@@ -45,7 +59,7 @@ def main():
     parser.add_argument("--train_size", type=int, help="Number of samples to use for training")
     parser.add_argument("--corpus_size", type=int, help="Number of samples to use for corpus; set to 0 to use all available samples")
     parser.add_argument("--epsilon", type=float, help="Initial value for epsilon-greedy sampling")
-    parser.add_argument("--epsilon_decay", type=float, help="Decay rate for epsilon")
+    parser.add_argument("--expl_decay_rate", type=float, help="Decay rate for exploration coefficient")
     parser.add_argument("--top_k", type=int, help="Number of top-k samples for policy approximation; set to 0 to use all samples (true policy)")
     parser.add_argument("--reward", type=str, choices=[reward.value for reward in Reward], help="Reward function")
     parser.add_argument("--encoder_model_type", type=str, choices=[emt.value for emt in EncoderModelType], help="Class of encoder model to use")
@@ -61,20 +75,21 @@ def main():
 
     initialize_seeds(args.rseed)
 
+    get_data, process_data, check_correct = get_dataset_functions(arg_dict)
     if args.train or args.eval:
         with GeneratorCM(arg_dict): # Load/save generator prediction cache on program start/exit
             if args.train:
-                train_reticl(arg_dict)
+                train_reticl(get_data, process_data, check_correct, "train", "dev500", arg_dict)
             if args.eval:
-                evaluate_reticl(arg_dict, args.eval)
+                evaluate(get_data, process_data, check_correct, args.eval, arg_dict)
     if args.finetune_gpt2:
-        finetune_gpt2(arg_dict)
+        finetune_gpt2(get_data, process_data, arg_dict)
     if args.finetune_bert:
-        finetune_bert(arg_dict)
+        finetune_bert(get_data, process_data, arg_dict)
     if args.error_analysis:
         error_analysis(*args.error_analysis, arg_dict)
     if args.viz:
-        visualize_representations(arg_dict)
+        visualize_representations(get_data, process_data, arg_dict)
 
 if __name__ == "__main__":
     main()

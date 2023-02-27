@@ -4,6 +4,12 @@ class Datasets(Enum):
     TABMWP = "tabmwp"
     GSM8K = "gsm8k"
 
+class ModelType(Enum):
+    RNN = "rnn"
+    LSTM = "lstm"
+    ATTN = "attn"
+    IND = "ind"
+
 class EncoderModelType(Enum):
     SBERT = "sbert"
     BERT = "bert"
@@ -11,7 +17,6 @@ class EncoderModelType(Enum):
 
 class RLAlgorithm(Enum):
     MCC = "mcc"
-    DQN = "dqn"
     REINFORCE = "reinforce"
     RWB = "rwb"
     AC = "ac"
@@ -27,6 +32,10 @@ class Reward(Enum):
     PPL = "ppl"
     EXACT = "exact"
     EXACT_AND_BLEU = "exact_and_bleu"
+
+class Init(Enum):
+    DEFAULT = "default"
+    ORTHOGONAL = "ortho"
 
 MODEL_TO_EMB_SIZE = {
     "all-mpnet-base-v2": 768,

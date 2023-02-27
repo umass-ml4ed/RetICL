@@ -12,7 +12,7 @@ import faiss
 from data_loading.data_types import DataSample, GetDataFunction, ProcessDataFunction
 from models.retriever import Retriever
 from constants import SamplingMethod, EncoderModelType
-from utils import device, TrainOptions, is_pg
+from utils import device, TrainOptions
 
 class ICLSample(TypedDict):
     # For evaluation
@@ -24,7 +24,7 @@ class ICLSample(TypedDict):
     example_encodings: torch.Tensor
     policy_example_indices: torch.Tensor
     # For PG version of model
-    all_example_encodings: Optional[torch.Tensor]
+    all_example_encodings: torch.Tensor
 
 class CollatedBatch(TypedDict):
     # For evaluation
@@ -37,7 +37,7 @@ class CollatedBatch(TypedDict):
     policy_example_indices: torch.Tensor
     num_examples: torch.Tensor
     # For PG version of model
-    all_example_encodings: Optional[torch.Tensor]
+    all_example_encodings: torch.Tensor
 
 class RetICLDataset(TorchDataset):
     def __init__(self, get_data: GetDataFunction, process_sample: ProcessDataFunction,
@@ -79,21 +79,21 @@ class RetICLDataset(TorchDataset):
                 batch = samples[batch_start_idx : batch_start_idx + batch_size]
                 if self.options.encoder_model_type == EncoderModelType.SBERT.value:
                     seq_strings = [
-                        (sample["context"] + sample["label"]) if inc_label else sample["context"]
+                        (sample["encoder_context"] + sample["encoder_label"]) if inc_label else sample["encoder_context"]
                         for sample in batch
                     ]
                     outputs = encoder.encode(seq_strings, convert_to_tensor=True)
                 elif self.options.encoder_model_type == EncoderModelType.BERT.value:
                     inputs = tokenizer(
-                        [sample["context"] for sample in batch],
-                        [sample["label"] for sample in batch] if inc_label else None,
+                        [sample["encoder_context"] for sample in batch],
+                        [sample["encoder_label"] for sample in batch] if inc_label else None,
                         return_tensors="pt", padding=True, truncation=True, max_length=512
                     ).to(device)
                     outputs = encoder(**inputs).pooler_output
                     # outputs = encoder(**inputs).last_hidden_state[:, 0]
                 elif self.options.encoder_model_type == EncoderModelType.GPT2.value:
                     seq_strings = [
-                        (sample["context"] + sample["label"]) if inc_label else sample["context"]
+                        (sample["encoder_context"] + sample["encoder_label"]) if inc_label else sample["encoder_context"]
                         for sample in batch
                     ]
                     inputs = tokenizer(seq_strings, return_tensors="pt", padding=True).to(device)
@@ -102,17 +102,20 @@ class RetICLDataset(TorchDataset):
                         torch.sum(inputs.attention_mask, dim=-1) - 1
                     ]
                 for sample, encoding in zip(batch, outputs):
-                    sample["full_encoding" if inc_label else "context_encoding"] = encoding
+                    if inc_label:
+                        sample["full_encoding"] = encoding
+                    else:
+                        sample["context_encoding"] = encoding
 
         with torch.no_grad():
             batch_encode(self.data, False)
             if self.options.sm == SamplingMethod.SIMILARITY.value:
                 if id(self.corpus) != id(self.data): # No need to re-encode context if corpus is same as data
                     batch_encode(self.corpus, False)
-                self.encoding_matrix = torch.stack([sample["context_encoding"] for sample in self.corpus])
+                self.encoding_matrix = torch.stack([sample["context_encoding"] for sample in self.corpus]).to(device)
             else:
                 batch_encode(self.corpus, True)
-                self.encoding_matrix = torch.stack([sample["full_encoding"] for sample in self.corpus])
+                self.encoding_matrix = torch.stack([sample["full_encoding"] for sample in self.corpus]).to(device)
 
         # Construct index for sample lookup
         self.emb_size = self.encoding_matrix.shape[1]
@@ -167,15 +170,11 @@ class RetICLDataset(TorchDataset):
                 example_encodings = None
             else:
                 example_encodings = torch.empty((0, self.emb_size)).to(device)
-            if is_pg(self.options):
-                all_example_encodings = torch.empty((0, len(self.corpus), self.emb_size)).to(device)
-            else:
-                all_example_encodings = None
 
             # Retrieve examples until context is full
             while len(examples) < self.options.num_examples:
                 if self.options.sm == SamplingMethod.EPSILON_GREEDY.value:
-                    # Epsilon-greedy: if roll is above epsilon then sample from retriever, otherwise pick random sample
+                    # If roll is above epsilon then sample from retriever, otherwise pick random sample
                     if self.greedy or random.random() > self.epsilon:
                         qv = self.retriever.get_query_vector(
                             current_sample_encoding=cur_sample["context_encoding"],
@@ -185,7 +184,7 @@ class RetICLDataset(TorchDataset):
                     else:
                         example_idx = random_example_idxs[0]
                 elif self.options.sm == SamplingMethod.SOFTMAX.value:
-                    # Policy Gradient: sample from policy at current state
+                    # Sample from policy at current state
                     qv = self.retriever.get_query_vector(
                         current_sample_encoding=cur_sample["context_encoding"],
                         example_encodings=example_encodings,
@@ -220,12 +219,10 @@ class RetICLDataset(TorchDataset):
                 example = self.corpus[example_idx]
                 examples.append(example)
                 policy_example_indices.append(example_idx)
-                prompt += example["context"] + example["label"] + "\n\n"
+                prompt += example["lm_context"] + example["lm_label"] + "\n\n"
                 if self.options.sm not in (SamplingMethod.RANDOM.value, SamplingMethod.SIMILARITY.value):
                     example_encoding = example["full_encoding"]
                     example_encodings = torch.cat([example_encodings, example_encoding.unsqueeze(0).to(device)], dim=0)
-                if is_pg(self.options):
-                    all_example_encodings = torch.cat([all_example_encodings, self.encoding_matrix.unsqueeze(0)], dim=0)
 
         if training:
             self.retriever.train()
@@ -234,13 +231,13 @@ class RetICLDataset(TorchDataset):
             assert not any([id(ex) == id(cur_sample) for ex in examples])
 
         return {
-            "prompt": prompt + cur_sample["context"],
-            "label": cur_sample["label"],
+            "prompt": prompt + cur_sample["lm_context"],
+            "label": cur_sample["lm_label"],
             "meta_data": cur_sample["meta_data"],
             "current_sample_encoding": cur_sample.get("context_encoding"),
             "example_encodings": example_encodings,
             "policy_example_indices": policy_example_indices,
-            "all_example_encodings": all_example_encodings,
+            "all_example_encodings": self.retriever and self.encoding_matrix,
         }
 
     def __len__(self):
@@ -266,8 +263,5 @@ class Collator():
                 [torch.LongTensor(sample["policy_example_indices"]) for sample in batch],
                 batch_first=True
             ).to(device),
-            "all_example_encodings": pad_sequence(
-                [sample["all_example_encodings"] for sample in batch],
-                batch_first=True
-            ).to(device) if batch[0]["all_example_encodings"] is not None else None,
+            "all_example_encodings": batch[0]["all_example_encodings"],
         }

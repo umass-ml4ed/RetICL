@@ -7,12 +7,9 @@ import matplotlib.pyplot as plt
 from sklearn.manifold import TSNE
 from tqdm import tqdm
 
-from models.reticl import RetICL
-from data_loading.reticl import RetICLDataset, Collator, CollatedBatch
-from data_loading.tabmwp import tabmwp_get_data, tabmwp_process_sample
-from data_loading.gsm8k import gsm8k_get_data, gsm8k_process_sample
-from evaluate import check_correct
-from constants import Datasets
+from models.reticl_rnn import RetICLRNN
+from data_loading.data_types import GetDataFunction, ProcessDataFunction
+from data_loading.reticl_dataset import RetICLDataset, Collator
 from utils import TrainOptions, device
 
 def get_problem_class(solution: str):
@@ -25,13 +22,12 @@ def get_problem_class(solution: str):
         ("div", len(re.findall(r"<<[\d\.]+/[\d\.]+=[\d\.]+>>", solution))),
     )
 
-def get_transformed_encodings(retriever: RetICL, dataset: RetICLDataset):
+def get_transformed_encodings(retriever: RetICLRNN, dataset: RetICLDataset):
     with torch.no_grad():
         return torch.matmul(dataset.encoding_matrix, retriever.bilinear.T)
 
-def get_latent_states_and_query_vectors(retriever: RetICL, dataset: RetICLDataset, options: TrainOptions):
+def get_latent_states(retriever: RetICLRNN, dataset: RetICLDataset, options: TrainOptions):
     all_latent_states = []
-    all_query_vectors = []
     data_loader = DataLoader(
         dataset,
         collate_fn=Collator(),
@@ -41,14 +37,12 @@ def get_latent_states_and_query_vectors(retriever: RetICL, dataset: RetICLDatase
     for batch in tqdm(data_loader):
         # TODO: collect correctness?
         with torch.no_grad():
-            latent_states, query_vectors = retriever.get_latent_states_and_query_vectors(**batch)
+            latent_states = retriever.get_latent_states(**batch)
         all_latent_states.append(latent_states.detach().cpu().numpy())
-        all_query_vectors.append(query_vectors.detach().cpu().numpy())
     all_latent_states = np.concatenate(all_latent_states, axis=0)
-    all_query_vectors = np.concatenate(all_query_vectors, axis=0)
-    return all_latent_states[:, 0], all_query_vectors[:, 0]
+    return all_latent_states[:, 0]
 
-def visualize_representations(options_dict: dict):
+def visualize_representations(get_data: GetDataFunction, process_sample: ProcessDataFunction, options_dict: dict):
     options = TrainOptions(options_dict)
     mode = "encodings"
 
@@ -56,17 +50,12 @@ def visualize_representations(options_dict: dict):
     if mode == "encodings":
         retriever = None
     else:
-        retriever = RetICL(options).to(device)
+        retriever = RetICLRNN(options).to(device)
         retriever.load_state_dict(torch.load(f"{options.model_name}.pt", map_location=device))
         retriever.eval()
 
     # Load data
-    if options.dataset == Datasets.TABMWP.value:
-        dataset = RetICLDataset(tabmwp_get_data, tabmwp_process_sample, "train", retriever, options)
-    elif options.dataset == Datasets.GSM8K.value:
-        dataset = RetICLDataset(gsm8k_get_data, gsm8k_process_sample, "train", retriever, options)
-    else:
-        raise Exception(f"Dataset {options.dataset} not supported!")
+    dataset = RetICLDataset(get_data, process_sample, "train", retriever, options)
     dataset.set_greedy(True)
     all_meta_data = [example["meta_data"] for example in dataset.corpus]
 
@@ -84,7 +73,7 @@ def visualize_representations(options_dict: dict):
         with torch.no_grad():
             reprs = torch.matmul(dataset.encoding_matrix, retriever.bilinear.T)
     elif mode == "latent_states":
-        reprs, _ = get_latent_states_and_query_vectors(retriever, dataset, options)
+        reprs = get_latent_states(retriever, dataset, options)
 
     # Reduce to 2 dimensions via T-SNE
     tsne = TSNE(n_components=2, perplexity=40)

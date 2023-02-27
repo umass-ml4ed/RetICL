@@ -4,7 +4,7 @@ from typing import Dict, List
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from models.gpt3 import gpt3_completion_with_batching
+from models.gpt3 import gpt3_completion_parallel, gpt3_completion_with_batching
 from utils import device, TrainOptions
 
 def get_saved_cache(cache_filename: str):
@@ -45,6 +45,7 @@ class Generator:
         # Get updates from other processes and then save whole thing
         temp_cache = get_saved_cache(cls._cache_filename)
         cls._cache.update(temp_cache)
+        print(f"Saving cache ({len(cls._cache)} entries)...")
         with open(cls._cache_filename, "w", encoding="utf-8") as cache_file:
             json.dump(cls._cache, cache_file, indent=2, ensure_ascii=False)
 
@@ -54,7 +55,7 @@ class Generator:
             import pdb; pdb.set_trace()
             # TODO: only calculate ppl on labels
             # TODO: scale up ppl on part with final answer
-            results = gpt3_completion_with_batching(prompts, cls._gpt3_model_name, max_tokens=0, logprobs=1, echo=True)
+            results = gpt3_completion_parallel(prompts, cls._gpt3_model_name, max_tokens=0, logprobs=1, echo=True)
             return torch.stack([
                 torch.tensor(choice["logprobs"]["token_logprobs"][1:]).mean()
                 for choice in results
@@ -88,7 +89,9 @@ class Generator:
         if cls._model_name == "gpt3":
             uncached_prompts = [prompt for prompt in prompts if prompt not in cls._cache]
             if uncached_prompts:
-                results = gpt3_completion_with_batching(uncached_prompts, cls._gpt3_model_name)
+                # results = gpt3_completion_with_batching(uncached_prompts, cls._gpt3_model_name)
+                results = gpt3_completion_parallel(uncached_prompts, cls._gpt3_model_name)
+                assert len(uncached_prompts) == len(results)
                 for prompt, result in zip(uncached_prompts, results):
                     cls._cache[prompt] = result["text"]
         else:
