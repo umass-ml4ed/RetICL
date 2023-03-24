@@ -10,6 +10,7 @@ from analysis import visualize_representations
 from data_loading.data_types import GetDataFunction, ProcessDataFunction, CheckCorrectFunction
 from data_loading.tabmwp import tabmwp_get_data, tabmwp_process_sample, tabmwp_check_correct
 from data_loading.gsm8k import gsm8k_get_data, gsm8k_process_sample, gsm8k_check_correct
+from data_loading.math import math_get_data, math_process_sample, math_check_correct
 from models.generator import GeneratorCM
 from constants import Datasets, RLAlgorithm, SamplingMethod, Reward, EncoderModelType, ModelType, Init
 from utils import initialize_seeds, device, TrainOptions
@@ -20,7 +21,12 @@ def get_dataset_functions(options_dict: dict) -> Tuple[GetDataFunction, ProcessD
         return tabmwp_get_data, tabmwp_process_sample, tabmwp_check_correct
     if options.dataset == Datasets.GSM8K.value:
         return gsm8k_get_data, gsm8k_process_sample, gsm8k_check_correct
+    if options.dataset == Datasets.MATH.value:
+        return math_get_data, math_process_sample, math_check_correct
     raise Exception(f"Dataset {options.dataset} not supported!")
+
+def bool_type(arg: str):
+    return False if arg == "0" else True
 
 def main():
     if device.type == "cuda":
@@ -58,16 +64,20 @@ def main():
     parser.add_argument("--num_examples", type=int, help="Number of examples to include in the prompt")
     parser.add_argument("--train_size", type=int, help="Number of samples to use for training")
     parser.add_argument("--corpus_size", type=int, help="Number of samples to use for corpus; set to 0 to use all available samples")
+    parser.add_argument("--save_best", type=bool_type, help="Save best model based on validation reward, otherwise save model at last epoch")
     parser.add_argument("--epsilon", type=float, help="Initial value for epsilon-greedy sampling")
     parser.add_argument("--expl_decay_rate", type=float, help="Decay rate for exploration coefficient")
     parser.add_argument("--top_k", type=int, help="Number of top-k samples for policy approximation; set to 0 to use all samples (true policy)")
     parser.add_argument("--reward", type=str, choices=[reward.value for reward in Reward], help="Reward function")
     parser.add_argument("--encoder_model_type", type=str, choices=[emt.value for emt in EncoderModelType], help="Class of encoder model to use")
     parser.add_argument("--encoder_model", type=str, help="Pre-trained model for sample encoding")
+    parser.add_argument("--soft_prompt_len", type=int, help="Length of encoder soft prompts")
     parser.add_argument("--hidden_size", type=int, help="Hidden size for RNN")
     parser.add_argument("--dropout", type=float, help="Dropout rate for RNN")
     parser.add_argument("--v_coef", type=float, help="Coefficient for value loss")
     parser.add_argument("--e_coef", type=float, help="Coefficient for entropy loss")
+    parser.add_argument("--sep_val_model", type=bool_type, help="Separate value model from policy model")
+    parser.add_argument("--max_gen_tokens", type=int, help="Maximum number of tokens to generate")
     parser.add_argument("--rseed", type=int, help="Random seed", default=221)
 
     args = parser.parse_args()
@@ -79,7 +89,7 @@ def main():
     if args.train or args.eval:
         with GeneratorCM(arg_dict): # Load/save generator prediction cache on program start/exit
             if args.train:
-                train_reticl(get_data, process_data, check_correct, "train", "dev500", arg_dict)
+                train_reticl(get_data, process_data, check_correct, "train", "dev", arg_dict)
             if args.eval:
                 evaluate(get_data, process_data, check_correct, args.eval, arg_dict)
     if args.finetune_gpt2:

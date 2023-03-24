@@ -24,25 +24,28 @@ def gsm8k_get_data(split: str, options: TrainOptions):
     else:
         # Get evaluation samples from split and corpus from train set
         if split == "dev":
+            data = val_data[:200]
+        elif split == "dev100":
             data = val_data[:100]
-        elif split == "dev500":
-            data = val_data[:500]
-        elif split == "dev1k":
-            data = val_data
         else:
             data = gsm8k_load_data(split)
         corpus = train_data
     return data, corpus
 
 def gsm8k_process_sample(sample: dict) -> DataSample:
-    question = sample["question"].replace("\n", "\\n")
-    answer = remove_calc_annotations(sample["answer"]).replace("\n", "\\n")
-    answer_lines = answer.split("\\n")
+    # question = sample["question"].replace("\n", "\\n")
+    # answer = remove_calc_annotations(sample["answer"]).replace("\n", "\\n")
+    question = sample["question"]
+    answer = remove_calc_annotations(sample["answer"])
+    answer = answer.replace("####", "Final Answer:")
+    answer_lines = answer.split("\n")
     return {
-        "lm_context": f"Question: {question}\nAnswer: ",
-        "lm_label": answer,
-        "encoder_context": f"Question: {question}\nAnswer: ",
-        "encoder_label": answer,
+        "lm_context": f"Problem: {question}\nSolution:",
+        "lm_label": f" {answer}",
+        # "encoder_context": f"Question: {question}\nAnswer: ",
+        # "encoder_label": answer,
+        "encoder_context": f"Problem: {question}",
+        "encoder_label": f"\nSolution: {answer}",
         # "encoder_context": f"Problem: {question}",
         # "encoder_label": f"Full Solution: [SEP]{'[SEP]'.join(answer_lines)}",
         # "encoder_label": f"Full Solution: {answer}",
@@ -60,11 +63,14 @@ def remove_calc_annotations(solution: str):
     result += solution[end_idx:]
     return result
 
-def extract_answer(solution: str):
-    match = re.findall(r"#### (.*)$", solution)
+def extract_answer(solution: str, pattern: re.Pattern):
+    chars_to_remove = re.compile(r"[,\$%]")
+    match = pattern.findall(chars_to_remove.sub("", solution))
     if not match:
         return ""
-    return match[-1].replace(",", "").strip()
+    return match[-1].strip().strip(".").replace(".00", "")
 
 def gsm8k_check_correct(src_meta_data: dict, pred_text: str):
-    return extract_answer(src_meta_data["answer"]) == extract_answer(pred_text)
+    src_pattern = re.compile(r"#### (.*)$")
+    pred_pattern = re.compile(r"Final Answer: ([\d\.]+)")
+    return extract_answer(src_meta_data["answer"], src_pattern) == extract_answer(pred_text, pred_pattern)

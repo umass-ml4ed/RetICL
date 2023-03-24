@@ -26,12 +26,14 @@ def tabmwp_get_data(split: str, options: TrainOptions):
     else:
         # Get evaluation samples from split and corpus from train set
         if split == "dev":
+            data = tabmwp_load_data("dev1k")[:200]
+        elif split == "dev100":
             data = tabmwp_load_data("dev")[:100]
-        elif split == "dev500":
-            data = tabmwp_load_data("dev")[:500]
         else:
             data = tabmwp_load_data(split)
         corpus = tabmwp_load_data("train")
+        if split.startswith("test") and options.corpus_size != 0:
+            corpus = random.Random(221).sample(corpus, options.corpus_size)
     return data, corpus
 
 def tabmwp_process_sample(sample: dict) -> DataSample:
@@ -41,10 +43,12 @@ def tabmwp_process_sample(sample: dict) -> DataSample:
     answer = get_answer(sample)
     solution = get_solution_text(sample)
     return {
-        "lm_context": f"Table: {table}\nQuestion: {question}\nAnswer: ",
-        "lm_label": f"{solution} The answer is {answer}.",
-        "encoder_context": f"Table: {table}\nQuestion: {question}\nAnswer: ",
-        "encoder_label": f"{solution} The answer is {answer}.",
+        "lm_context": f"Table: {table}\nProblem: {question}\nSolution:",
+        "lm_label": f" {solution}\nFinal Answer: {answer}",
+        "encoder_context": f"Table: {table}\nProblem: {question}",
+        "encoder_label": f"\nSolution: {solution}\nFinal Answer: {answer}",
+        # "lm_context": f"Table: {table}\nQuestion: {question}\nAnswer:",
+        # "lm_label": f" {solution} The answer is {answer}.",
         # "encoder_context": f"Table: {table}\nQuestion: {question}",
         # "encoder_label": f"Answer: {solution} The answer is {answer}.",
         "meta_data": sample,
@@ -57,11 +61,13 @@ def extract_prediction(output: str, options: List[str]):
     output = re.sub(r"(?<=\d)[\=](?=[\-\$\d])", " = ", output)
     output = re.sub(r"\u2212", "-", output)
 
-    match = re.findall(r"The answer is\s+(.*)$", output)
+    # Get exact answer string, skip over letter in parens if present
+    # match = re.findall(r"The answer is\s+(\([a-zA-Z]\)\s+)?(.*)$", output)
+    match = re.findall(r"Final Answer:\s+(\([a-zA-Z]\)\s+)?(.*)$", output)
     if not match:
         return output
 
-    res = match[-1].strip()
+    res = match[-1][-1].strip()
     if not res.endswith(".M."):
         res = res.strip(".")
     # Map single letter prediction to option

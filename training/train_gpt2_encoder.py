@@ -36,7 +36,7 @@ def finetune_gpt2(get_data: GetDataFunction, process_sample: ProcessDataFunction
     model = GPT2LMHeadModel.from_pretrained("gpt2").to(device)
 
     train_dataset = GPT2Dataset(get_data, process_sample, "train", options)
-    val_dataset = GPT2Dataset(get_data, process_sample, "dev1k", options)
+    val_dataset = GPT2Dataset(get_data, process_sample, "dev", options)
 
     training_args = TrainingArguments(
         output_dir=options.model_name,

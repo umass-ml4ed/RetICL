@@ -59,62 +59,62 @@ class RetICLDataset(TorchDataset):
 
         # Compute encodings
         if options.sm != SamplingMethod.RANDOM.value:
+            if self.options.encoder_model_type == EncoderModelType.BERT.value:
+                self.encoder = BertModel.from_pretrained(self.options.encoder_model or "bert-base-cased").to(device)
+                self.tokenizer = AutoTokenizer.from_pretrained("bert-base-cased")
+            elif self.options.encoder_model_type == EncoderModelType.GPT2.value:
+                self.encoder = GPT2Model.from_pretrained(self.options.encoder_model or "gpt2").to(device)
+                self.tokenizer = AutoTokenizer.from_pretrained("gpt2")
+                self.tokenizer.pad_token = self.tokenizer.eos_token
+            else:
+                self.encoder = SentenceTransformer(self.options.encoder_model or "all-mpnet-base-v2")
             self.compute_encodings()
+
+    def batch_encode(self, samples: List[DataSample], inc_label: bool):
+        batch_size = 10
+        for batch_start_idx in tqdm(range(0, len(samples), batch_size)):
+            batch = samples[batch_start_idx : batch_start_idx + batch_size]
+            if self.options.encoder_model_type == EncoderModelType.SBERT.value:
+                seq_strings = [
+                    (sample["encoder_context"] + sample["encoder_label"]) if inc_label else sample["encoder_context"]
+                    for sample in batch
+                ]
+                outputs = self.encoder.encode(seq_strings, convert_to_tensor=True)
+            elif self.options.encoder_model_type == EncoderModelType.BERT.value:
+                inputs = self.tokenizer(
+                    [sample["encoder_context"] for sample in batch],
+                    [sample["encoder_label"] for sample in batch] if inc_label else None,
+                    return_tensors="pt", padding=True, truncation=True, max_length=512
+                ).to(device)
+                outputs = self.encoder(**inputs).pooler_output
+                # outputs = encoder(**inputs).last_hidden_state[:, 0]
+            elif self.options.encoder_model_type == EncoderModelType.GPT2.value:
+                seq_strings = [
+                    (sample["encoder_context"] + sample["encoder_label"]) if inc_label else sample["encoder_context"]
+                    for sample in batch
+                ]
+                inputs = self.tokenizer(seq_strings, return_tensors="pt", padding=True).to(device)
+                outputs = self.encoder(**inputs).last_hidden_state[
+                    torch.arange(inputs.input_ids.shape[0]),
+                    torch.sum(inputs.attention_mask, dim=-1) - 1
+                ]
+            for sample, encoding in zip(batch, outputs):
+                if inc_label:
+                    sample["full_encoding"] = encoding
+                else:
+                    sample["context_encoding"] = encoding
 
     def compute_encodings(self):
         print("Encoding samples...")
-        if self.options.encoder_model_type == EncoderModelType.BERT.value:
-            encoder = BertModel.from_pretrained(self.options.encoder_model or "bert-base-cased").to(device)
-            tokenizer = AutoTokenizer.from_pretrained("bert-base-cased")
-        elif self.options.encoder_model_type == EncoderModelType.GPT2.value:
-            encoder = GPT2Model.from_pretrained(self.options.encoder_model or "gpt2").to(device)
-            tokenizer = AutoTokenizer.from_pretrained("gpt2")
-            tokenizer.pad_token = tokenizer.eos_token
-        else:
-            encoder = SentenceTransformer(self.options.encoder_model or "all-mpnet-base-v2")
-
-        def batch_encode(samples: List[DataSample], inc_label: bool):
-            batch_size = 10
-            for batch_start_idx in tqdm(range(0, len(samples), batch_size)):
-                batch = samples[batch_start_idx : batch_start_idx + batch_size]
-                if self.options.encoder_model_type == EncoderModelType.SBERT.value:
-                    seq_strings = [
-                        (sample["encoder_context"] + sample["encoder_label"]) if inc_label else sample["encoder_context"]
-                        for sample in batch
-                    ]
-                    outputs = encoder.encode(seq_strings, convert_to_tensor=True)
-                elif self.options.encoder_model_type == EncoderModelType.BERT.value:
-                    inputs = tokenizer(
-                        [sample["encoder_context"] for sample in batch],
-                        [sample["encoder_label"] for sample in batch] if inc_label else None,
-                        return_tensors="pt", padding=True, truncation=True, max_length=512
-                    ).to(device)
-                    outputs = encoder(**inputs).pooler_output
-                    # outputs = encoder(**inputs).last_hidden_state[:, 0]
-                elif self.options.encoder_model_type == EncoderModelType.GPT2.value:
-                    seq_strings = [
-                        (sample["encoder_context"] + sample["encoder_label"]) if inc_label else sample["encoder_context"]
-                        for sample in batch
-                    ]
-                    inputs = tokenizer(seq_strings, return_tensors="pt", padding=True).to(device)
-                    outputs = encoder(**inputs).last_hidden_state[
-                        torch.arange(inputs.input_ids.shape[0]),
-                        torch.sum(inputs.attention_mask, dim=-1) - 1
-                    ]
-                for sample, encoding in zip(batch, outputs):
-                    if inc_label:
-                        sample["full_encoding"] = encoding
-                    else:
-                        sample["context_encoding"] = encoding
 
         with torch.no_grad():
-            batch_encode(self.data, False)
+            self.batch_encode(self.data, False)
             if self.options.sm == SamplingMethod.SIMILARITY.value:
                 if id(self.corpus) != id(self.data): # No need to re-encode context if corpus is same as data
-                    batch_encode(self.corpus, False)
+                    self.batch_encode(self.corpus, False)
                 self.encoding_matrix = torch.stack([sample["context_encoding"] for sample in self.corpus]).to(device)
             else:
-                batch_encode(self.corpus, True)
+                self.batch_encode(self.corpus, True)
                 self.encoding_matrix = torch.stack([sample["full_encoding"] for sample in self.corpus]).to(device)
 
         # Construct index for sample lookup
@@ -194,6 +194,7 @@ class RetICLDataset(TorchDataset):
                     else:
                         # Randomly sample an example from the policy
                         activations = torch.matmul(qv, self.encoding_matrix.T)
+                        # TODO: make sure no grads on self.encoding_matrix here
                         activations[used_idxs] = -torch.inf
                         if self.options.top_k:
                             _, top_k_act_idxs = torch.topk(activations, self.options.top_k)
@@ -201,10 +202,6 @@ class RetICLDataset(TorchDataset):
                             new_activations[top_k_act_idxs] = activations[top_k_act_idxs]
                             activations = new_activations
                         pi_cur = torch.softmax(activations, dim=0)
-                        # val_ests = self.retriever.get_all_value_estimates(
-                        #     current_sample_encoding=cur_sample["context_encoding"],
-                        #     all_example_encodings=self.encoding_matrix
-                        # )
                         example_idx = torch.multinomial(pi_cur, 1).item()
                 elif self.options.sm == SamplingMethod.RANDOM.value:
                     example_idx = random_example_idxs[0]

@@ -36,14 +36,23 @@ Place those folders in this repo's root folder.
 
 You can see all options by running `python3 run.py --help`. Default values can be found in the `TrainOptions` constructor in `utils.py`.
 
-Train example:
+
+### Examples
+
+Train:
 ```
 python3 run.py --train --rl_algo ppo --sm softmax --dataset gsm8k --model_name gsm8k_ppo
 ```
 
-Test example:
+Test:
 ```
-python3 run.py --eval dev1k --rl_algo ppo --sm softmax --dataset gsm8k --model_name gsm8k_ppo
+python3 run.py --eval test --rl_algo ppo --sm softmax --dataset gsm8k --model_name gsm8k_ppo
+```
+
+Baselines:
+```
+python3 run.py --eval test --sm random --dataset gsm8k
+python3 run.py --eval test --sm sim --dataset gsm8k
 ```
 
 ## External Code

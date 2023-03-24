@@ -21,6 +21,11 @@ class RetICLBase(nn.Module):
         self.bilinear = nn.Parameter(torch.empty((options.hidden_size, self.emb_size)))
         self.bias = nn.Parameter(torch.zeros((1)))
         self.value_fn_estimator = nn.Linear(options.hidden_size, 1)
+        if options.soft_prompt_len:
+            self.input_soft_prompt = nn.Parameter(torch.zeros((options.soft_prompt_len, self.emb_size)))
+            self.example_soft_prompt = nn.Parameter(torch.zeros((options.soft_prompt_len, self.emb_size)))
+            nn.init.normal_(self.input_soft_prompt, mean=0.0, std=1.0)
+            nn.init.normal_(self.example_soft_prompt, mean=0.0, std=1.0)
         if options.init == Init.ORTHOGONAL.value:
             nn.init.orthogonal_(self.bilinear, gain=1.0)
             orthogonal_init_(self.value_fn_estimator, gain=1.0)

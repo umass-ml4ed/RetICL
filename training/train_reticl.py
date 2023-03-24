@@ -13,14 +13,18 @@ from evaluate import evaluate_reticl
 from constants import SamplingMethod, RLAlgorithm, Reward
 from utils import TrainOptions, device, is_pg
 
+def get_predictions(batch: CollatedBatch, check_correct: CheckCorrectFunction):
+    # Generate predictions given retrieved context and check correctness
+    predictions = Generator.generate(**batch)
+    correct = torch.Tensor([
+        1 if check_correct(src_meta_data, pred) else 0
+        for src_meta_data, pred in zip(batch["meta_data"], predictions)
+    ])
+    return predictions, correct
+
 def get_rewards(batch: CollatedBatch, check_correct: CheckCorrectFunction, options: TrainOptions):
     if options.reward in (Reward.EXACT.value, Reward.EXACT_AND_BLEU.value):
-        # Generate predictions given retrieved context and check correctness
-        predictions = Generator.generate(**batch)
-        correct = torch.Tensor([
-            1 if check_correct(src_meta_data, pred) else 0
-            for src_meta_data, pred in zip(batch["meta_data"], predictions)
-        ])
+        predictions, correct = get_predictions(batch, check_correct)
 
         if options.reward == Reward.EXACT.value:
             # Reward is 1 if prediction is correct, -1 otherwise
@@ -38,7 +42,9 @@ def get_rewards(batch: CollatedBatch, check_correct: CheckCorrectFunction, optio
 
     # Reward is negative perplexity assigned to label given the context
     if options.reward == Reward.PPL.value:
-        return -Generator.get_ppl(**batch)
+        nlls = Generator.get_nll(**batch)
+        # return torch.exp(nlls)
+        return 2 * torch.exp(-nlls) - 1
 
 def get_td_error(value_estimates: torch.Tensor, rewards: torch.Tensor):
     batch_size = rewards.shape[0]
@@ -65,22 +71,21 @@ def get_entropy(activations: torch.Tensor):
     return entropy / torch.log(torch.tensor(action_distro.shape[-1]))
 
 def train_reticl(get_data: GetDataFunction, process_sample: ProcessDataFunction, check_correct: CheckCorrectFunction,
-                 train_split: str, val_split: str, options_dict: dict):
+                 train_split: str, dev_split: str, options_dict: dict):
     options = TrainOptions(options_dict)
-    share_val_est_model = True
     if options.wandb:
         run = wandb.init(project="reticl", config=options.as_dict())
     else:
         run = None
     retriever = retriever_model(options)
     retriever.train()
-    if not share_val_est_model:
+    if options.sep_val_model:
         val_est_model = retriever_model(options)
         val_est_model.train()
     else:
         val_est_model = None
     dataset = RetICLDataset(get_data, process_sample, train_split, retriever, options)
-    val_set = RetICLDataset(get_data, process_sample, val_split, retriever, options)
+    val_set = RetICLDataset(get_data, process_sample, dev_split, retriever, options)
     val_set.set_greedy(True) # Use greedy retrieval for validation
     data_loader = DataLoader(
         dataset,
@@ -96,7 +101,7 @@ def train_reticl(get_data: GetDataFunction, process_sample: ProcessDataFunction,
         shuffle=False,
         drop_last=False
     )
-    params = list(retriever.parameters()) if share_val_est_model else list(retriever.parameters()) + list(val_est_model.parameters())
+    params = list(retriever.parameters()) + list(val_est_model.parameters()) if options.sep_val_model else list(retriever.parameters())
     optimizer = torch.optim.AdamW(params, lr=options.lr, weight_decay=options.wd)
     torch.autograd.set_detect_anomaly(True)
     print("Training...")
@@ -142,11 +147,11 @@ def train_reticl(get_data: GetDataFunction, process_sample: ProcessDataFunction,
             returns = torch.cumsum(rewards.flip(1), dim=1).flip(1).view(-1) # (N * L)
 
             # Get activations on current examples and value function estimates from retriever
-            if share_val_est_model:
-                activations, value_estimates = retriever(**batch)
-            else:
+            if options.sep_val_model:
                 activations, _ = retriever(**batch)
                 _, value_estimates = val_est_model(**batch)
+            else:
+                activations, value_estimates = retriever(**batch)
 
             # Calculate loss and backprop
             loss_mask = torch.arange(max_num_examples).expand(batch_size, -1) >= batch["num_examples"].unsqueeze(1)
@@ -193,7 +198,6 @@ def train_reticl(get_data: GetDataFunction, process_sample: ProcessDataFunction,
                 previous_model.load_state_dict(retriever.state_dict())
 
                 # Get estimated advantage
-                # advantage = get_td_error(value_estimates, rewards)
                 advantage = get_gae(value_estimates, rewards)
 
                 # Get clip loss
@@ -208,11 +212,11 @@ def train_reticl(get_data: GetDataFunction, process_sample: ProcessDataFunction,
 
                 # Get final loss
                 # TODO: should add supplemental losses after taking mean?
-                if share_val_est_model:
-                    loss = clip_loss + options.v_coef * vf_loss - e_coef * entropy
-                else:
+                if options.sep_val_model:
                     loss = clip_loss - e_coef * entropy
                     vf_loss.mean().backward()
+                else:
+                    loss = clip_loss + options.v_coef * vf_loss - e_coef * entropy
             else:
                 raise Exception(f"Algorithm {options.rl_algo} not supported!")
             loss[loss_mask] = 0
@@ -261,10 +265,12 @@ def train_reticl(get_data: GetDataFunction, process_sample: ProcessDataFunction,
 
         # Save model with best reward on validation set
         if best_reward is None or avg_val_reward > best_reward:
-        # if True:
             best_reward = avg_val_reward
             print("Best!")
             best_model.load_state_dict(retriever.state_dict())
 
-    torch.save(best_model.state_dict(), f"{options.model_name}.pt")
-    evaluate_reticl(run, get_data, process_sample, check_correct, best_model, "dev1k", options)
+    # Save and evaluate final model
+    final_model = best_model if options.save_best else retriever
+    torch.save(final_model.state_dict(), f"{options.model_name}.pt")
+    if options.reward != Reward.PPL.value:
+        evaluate_reticl(run, get_data, process_sample, check_correct, final_model, dev_split, options)

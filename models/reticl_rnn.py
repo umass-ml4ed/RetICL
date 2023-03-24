@@ -48,8 +48,3 @@ class RetICLRNN(RetICLBase):
                 _, h_t = self.rnn(example_encodings, h_0.unsqueeze(0))
             h_t = h_t.squeeze(0)
         return torch.matmul(h_t, self.bilinear)
-
-    def get_all_value_estimates(self, current_sample_encoding: torch.Tensor, all_example_encodings: torch.Tensor, **kwargs):
-        h_0 = self.h_0_transform(current_sample_encoding).repeat(all_example_encodings.shape[0], 1) # (K x H)
-        _, h_1 = self.rnn(all_example_encodings.unsqueeze(1), h_0.unsqueeze(0)) # (1 x K x H)
-        return self.value_fn_estimator(h_1).view(-1) # (K)

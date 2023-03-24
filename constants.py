@@ -3,6 +3,7 @@ from enum import Enum
 class Datasets(Enum):
     TABMWP = "tabmwp"
     GSM8K = "gsm8k"
+    MATH = "math"
 
 class ModelType(Enum):
     RNN = "rnn"

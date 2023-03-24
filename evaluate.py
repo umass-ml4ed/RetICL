@@ -11,7 +11,7 @@ from models.generator import Generator
 from data_loading.data_types import GetDataFunction, ProcessDataFunction, CheckCorrectFunction
 from data_loading.reticl_dataset import RetICLDataset, Collator
 from constants import Datasets
-from utils import TrainOptions
+from utils import TrainOptions, device
 
 def evaluate_reticl(run, get_data: GetDataFunction, process_sample: ProcessDataFunction, check_correct: CheckCorrectFunction,
              retriever: Optional[Retriever], split: str, options: TrainOptions):
@@ -53,13 +53,15 @@ def evaluate_reticl(run, get_data: GetDataFunction, process_sample: ProcessDataF
     if run:
         run.config.eval_set = split
         run.summary["accuracy"] = acc
+        run.summary["eval_examples"] = len(example_set)
         if options.dataset == Datasets.TABMWP.value:
             run.summary["mc_accuracy"] = mc_acc
             run.summary["free_accuracy"] = free_acc
 
+    generator_model = options.generator_model.replace("/", "-")
     model_name = options.model_name if options.model_name else\
-        f"{options.sm}_{options.generator_model}" + (f"_{options.gpt3_model}" if options.generator_model == "gpt3" else "")
-    out_filename = f"results_{options.dataset}_{split}_{model_name}.csv"
+        f"{options.sm}_{generator_model}" + (f"_{options.gpt3_model}" if options.generator_model == "gpt3" else "")
+    out_filename = f"results_{options.dataset}_{split}_{model_name}_tex{options.num_examples}.csv"
     df = pandas.DataFrame({
         "prompt": prompts,
         "label": labels,
@@ -75,14 +77,15 @@ def evaluate(get_data: GetDataFunction, process_sample: ProcessDataFunction, che
     options = TrainOptions(options_dict)
     if options.model_name:
         retriever = retriever_model(options)
-        retriever.load_state_dict(torch.load(f"{options.model_name}.pt"))
+        retriever.load_state_dict(torch.load(f"{options.model_name}.pt", map_location=device))
     else:
         retriever = None
     evaluate_reticl(None, get_data, process_sample, check_correct, retriever, split, options)
 
 def answer_missing(df: pandas.DataFrame, dataset: str):
-    inidcator = "The answer is " if dataset == Datasets.TABMWP.value else "#### "
-    return (len(df) - df["pred"].str.contains(inidcator).sum()) / len(df)
+    # indicator = "The answer is " if dataset == Datasets.TABMWP.value else "#### "
+    indicator = "Final Answer: "
+    return (len(df) - df["pred"].str.contains(indicator).sum()) / len(df)
 
 def error_analysis(group_str: str, result_file_1: str, result_file_2: str, arg_dict: dict):
     num_examples = 10

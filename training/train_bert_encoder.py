@@ -57,7 +57,7 @@ def finetune_bert(get_data: GetDataFunction, process_sample: ProcessDataFunction
     model = BertForNextSentencePrediction.from_pretrained("bert-base-cased").to(device)
 
     train_dataset = BERTDataset(get_data, process_sample, "train", options)
-    val_dataset = BERTDataset(get_data, process_sample, "dev1k", options)
+    val_dataset = BERTDataset(get_data, process_sample, "dev", options)
 
     training_args = TrainingArguments(
         output_dir=options.model_name,

@@ -13,7 +13,7 @@ cur_key_idx = 0
 delay_time = 5.0
 decay_rate = 0.8
 
-MAX_BATCH_SIZE = 10
+MAX_BATCH_SIZE = 5
 
 def gpt3_completion_with_batching(prompts: List[str], model="code-davinci-002", max_tokens=400, logprobs=None, echo=False):
     # Break up requests evenly among keys, using largest batch size possible
@@ -52,7 +52,8 @@ def gpt3_completion(prompts: List[str], model="code-davinci-002", max_tokens=400
     global delay_time, cur_key_idx
 
     # Wait for rate limit, add random jitter to avoid thread collisions
-    time.sleep(delay_time + random.random() * 2e-2)
+    if model != "gpt-3.5-turbo":
+        time.sleep(delay_time + random.random() * 2e-2)
     # print(f"{delay_time:.3f}", key_to_use)
 
     # Assign/cycle API key
@@ -64,22 +65,45 @@ def gpt3_completion(prompts: List[str], model="code-davinci-002", max_tokens=400
 
     # Send request
     try:
-        response = openai.Completion.create(
-            model=model,
-            prompt=prompts,
-            temperature=0,
-            max_tokens=max_tokens,
-            top_p=1,
-            frequency_penalty=0.0,
-            presence_penalty=0.0,
-            stop=["\n"],
-            logprobs=logprobs,
-            echo=echo
-        )
+        if "gpt-3.5-turbo" in model:
+            results = []
+            for prompt in prompts:
+                response = openai.ChatCompletion.create(
+                    model=model,
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": "You are a few-shot completion model. "
+                                "You will be given several example problems with solutions, "
+                                "and then a new problem that you have to write the solution for. "
+                                "Match the formatting of the examples as closely as possible.\n\n" + prompt
+                        }
+                    ],
+                    temperature=0,
+                    max_tokens=max_tokens,
+                    top_p=1,
+                    frequency_penalty=0.0,
+                    presence_penalty=0.0,
+                )
+                results.append(response["choices"][0])
+        else:
+            response = openai.Completion.create(
+                model=model,
+                prompt=prompts,
+                temperature=0,
+                max_tokens=max_tokens,
+                top_p=1,
+                frequency_penalty=0.0,
+                presence_penalty=0.0,
+                stop=["\n\n"],
+                logprobs=logprobs,
+                echo=echo
+            )
+            results = response["choices"]
         delay_time *= decay_rate
     except (RateLimitError, Timeout, APIError, ServiceUnavailableError, APIConnectionError) as exc:
-        # print(openai.api_key, exc)
+        print(openai.api_key, exc)
         delay_time = min(delay_time * 2, 30)
         return gpt3_completion(prompts, model, max_tokens, logprobs, echo, key_to_use)
 
-    return response["choices"]
+    return results
