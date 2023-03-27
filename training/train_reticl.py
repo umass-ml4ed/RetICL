@@ -272,5 +272,4 @@ def train_reticl(get_data: GetDataFunction, process_sample: ProcessDataFunction,
     # Save and evaluate final model
     final_model = best_model if options.save_best else retriever
     torch.save(final_model.state_dict(), f"{options.model_name}.pt")
-    if options.reward != Reward.PPL.value:
-        evaluate_reticl(run, get_data, process_sample, check_correct, final_model, dev_split, options)
+    evaluate_reticl(run, get_data, process_sample, check_correct, final_model, dev_split, options)

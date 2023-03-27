@@ -53,6 +53,7 @@ class TrainOptions:
         self.e_coef: float = options_dict.get("e_coef", 0.0)
         self.sep_val_model: bool = options_dict.get("sep_val_model", False)
         self.max_gen_tokens: int = options_dict.get("max_gen_tokens", 400)
+        self.deterministic: bool = options_dict.get("deterministic", True)
 
     def as_dict(self):
         return self.__dict__

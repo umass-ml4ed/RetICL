@@ -79,11 +79,13 @@ def main():
     parser.add_argument("--sep_val_model", type=bool_type, help="Separate value model from policy model")
     parser.add_argument("--max_gen_tokens", type=int, help="Maximum number of tokens to generate")
     parser.add_argument("--rseed", type=int, help="Random seed", default=221)
+    parser.add_argument("--deterministic", type=bool_type, help="Use deterministic algorithms", default=True)
 
     args = parser.parse_args()
     arg_dict = {arg: val for arg, val in vars(args).items() if val is not None}
 
     initialize_seeds(args.rseed)
+    torch.use_deterministic_algorithms(args.deterministic, warn_only=True)
 
     get_data, process_data, check_correct = get_dataset_functions(arg_dict)
     if args.train or args.eval:
