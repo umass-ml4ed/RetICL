@@ -4,6 +4,7 @@ class Datasets(Enum):
     TABMWP = "tabmwp"
     GSM8K = "gsm8k"
     MATH = "math"
+    SVAMP = "svamp"
 
 class ModelType(Enum):
     RNN = "rnn"

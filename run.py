@@ -11,6 +11,7 @@ from data_loading.data_types import GetDataFunction, ProcessDataFunction, CheckC
 from data_loading.tabmwp import tabmwp_get_data, tabmwp_process_sample, tabmwp_check_correct
 from data_loading.gsm8k import gsm8k_get_data, gsm8k_process_sample, gsm8k_check_correct
 from data_loading.math import math_get_data, math_process_sample, math_check_correct
+from data_loading.svamp import svamp_get_data, svamp_process_sample, svamp_check_correct
 from models.generator import GeneratorCM
 from constants import Datasets, RLAlgorithm, SamplingMethod, Reward, EncoderModelType, ModelType, Init
 from utils import initialize_seeds, device, TrainOptions
@@ -23,6 +24,8 @@ def get_dataset_functions(options_dict: dict) -> Tuple[GetDataFunction, ProcessD
         return gsm8k_get_data, gsm8k_process_sample, gsm8k_check_correct
     if options.dataset == Datasets.MATH.value:
         return math_get_data, math_process_sample, math_check_correct
+    if options.dataset == Datasets.SVAMP.value:
+        return svamp_get_data, svamp_process_sample, svamp_check_correct
     raise Exception(f"Dataset {options.dataset} not supported!")
 
 def bool_type(arg: str):

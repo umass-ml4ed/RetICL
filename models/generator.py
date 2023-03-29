@@ -8,10 +8,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, StoppingCriteria, 
 import deepspeed
 
 from models.gpt3 import gpt3_completion_parallel, gpt3_completion_with_batching
-from constants import Reward
 from utils import device, TrainOptions
-
-GEN_BATCH_SIZE = 10
 
 def get_saved_cache(cache_filename: str):
     if os.path.exists(cache_filename):
@@ -35,10 +32,14 @@ class NLStoppingCriteria(StoppingCriteria):
         ])
 
 class Generator:
+    options = None
     _cache: Dict[str, str] = {}
     _model_name = ""
     _gpt3_model_name = ""
     _model = None
+    _model_ds = None
+    _use_ds = False
+    _gen_batch_size = 10
     _tokenizer = None
     _max_tokens = 0
     _cache_filename = ""
@@ -57,35 +58,26 @@ class Generator:
         if cls._model_name != "gpt3":
             print("Loading generator model...")
             start_time = time.time()
-            cls._use_ds = ("gpt-j" in cls._model_name or "gpt-noex" in cls._model_name) and cls.options.reward != Reward.PPL.value
+            cls._model = AutoModelForCausalLM.from_pretrained(cls._model_name, torch_dtype=torch.float16, low_cpu_mem_usage=True)
+            if "gpt-j" in cls._model_name:
+                cls._max_tokens = cls._model.config.n_positions
+            else:
+                cls._max_tokens = cls._model.config.max_position_embeddings
+            cls._model = cls._model.to(device)
+            cls._model.eval()
+            cls._use_ds = "gpt-j" in cls._model_name or "gpt-neox" in cls._model_name
             if cls._use_ds:
-                if cls._model_name == "EleutherAI/gpt-j-6B":
-                    model_name = "philschmid/gpt-j-6B-fp16-sharded"
-                else:
-                    model_name = cls._model_name
-                cls._model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float16)
-                if "gpt-j" in cls._model_name:
-                    cls._max_tokens = cls._model.config.n_positions
-                else:
-                    cls._max_tokens = cls._model.config.max_position_embeddings
-                cls._model = deepspeed.init_inference(
+                cls._model_ds = deepspeed.init_inference(
                     model=cls._model,
                     mp_size=1,
                     dtype=torch.float16,
                     replace_with_kernel_inject=True,
                     max_out_tokens=cls._max_tokens
                 )
-            else:
-                cls._model = AutoModelForCausalLM.from_pretrained(cls._model_name, torch_dtype=torch.float16, low_cpu_mem_usage=True)
-                if "gpt-j" in cls._model_name:
-                    cls._max_tokens = cls._model.config.n_positions
-                else:
-                    cls._max_tokens = cls._model.config.max_position_embeddings
-                cls._model = cls._model.to(device)
-            cls._model.eval()
             cls._tokenizer = AutoTokenizer.from_pretrained(cls._model_name)
-            cls._tokenizer.padding_side = "right" if cls.options.reward == Reward.PPL.value else "left"
             cls._tokenizer.pad_token = cls._tokenizer.eos_token
+            if "gpt-neox" in cls._model_name:
+                cls._gen_batch_size = 2
             print(f"Model loaded ({time.time() - start_time:.2f}s)")
 
     @classmethod
@@ -110,11 +102,13 @@ class Generator:
                         nlls.append(-torch.tensor(choice["logprobs"]["token_logprobs"][token_idx:]).mean())
                         break
             return torch.stack(nlls)
+
+        cls._tokenizer.padding_side = "right"
         nlls = []
-        for start_idx in range(0, len(prompts), GEN_BATCH_SIZE):
+        for start_idx in range(0, len(prompts), cls._gen_batch_size):
             # Construct tokenized inputs
-            prompt_batch = prompts[start_idx : start_idx + GEN_BATCH_SIZE]
-            label_batch = labels[start_idx : start_idx + GEN_BATCH_SIZE]
+            prompt_batch = prompts[start_idx : start_idx + cls._gen_batch_size]
+            label_batch = labels[start_idx : start_idx + cls._gen_batch_size]
             full_inputs = cls._tokenizer(
                 [prompt + label for prompt, label in zip(prompt_batch, label_batch)],
                 return_tensors="pt", padding=True
@@ -144,7 +138,7 @@ class Generator:
                 ).view(shift_labels.shape)
                 loss = loss.sum(dim=1) / loss_mask.sum(dim=1)
                 nlls.append(loss)
-        return torch.cat(nlls)
+        return torch.cat(nlls).float()
 
     @classmethod
     def generate(cls, prompts: List[str], **kwargs):
@@ -161,11 +155,12 @@ class Generator:
         else:
             torch.use_deterministic_algorithms(False) # Don't use deterministic algorithms to speed up generation
             with torch.no_grad():
+                cls._tokenizer.padding_side = "left"
                 if cls._use_ds:
                     uncached_prompts = [prompt for prompt in prompts if prompt not in cls._cache]
                     if uncached_prompts:
-                        for start_idx in range(0, len(uncached_prompts), GEN_BATCH_SIZE):
-                            batch = uncached_prompts[start_idx : start_idx + GEN_BATCH_SIZE]
+                        for start_idx in range(0, len(uncached_prompts), cls._gen_batch_size):
+                            batch = uncached_prompts[start_idx : start_idx + cls._gen_batch_size]
                             inputs = cls._tokenizer(batch, return_tensors="pt", padding=True).to(device)
                             overflow = inputs.input_ids.shape[1] + cls.options.max_gen_tokens - cls._max_tokens
                             if overflow > 0:
@@ -173,7 +168,7 @@ class Generator:
                                 # inputs.input_ids = inputs.input_ids[:, overflow:]
                                 # inputs.attention_mask = inputs.attention_mask[:, overflow:]
                                 print("Too long!")
-                            outputs = cls._model.generate(
+                            outputs = cls._model_ds.generate(
                                 **inputs,
                                 pad_token_id=cls._tokenizer.eos_token_id,
                                 stopping_criteria=[NLStoppingCriteria(cls._tokenizer, inputs.input_ids.shape[1])],
@@ -192,7 +187,7 @@ class Generator:
                         if prompt in cls._cache:
                             continue
                         input_ids = cls._tokenizer(prompt, return_tensors="pt").input_ids.to(device)
-                        overflow = inputs.input_ids.shape[1] + cls.options.max_gen_tokens - cls._max_tokens
+                        overflow = input_ids.shape[1] + cls.options.max_gen_tokens - cls._max_tokens
                         if overflow > 0:
                             # Remove tokens from beginning if prompt is too long
                             # inputs.input_ids = inputs.input_ids[:, overflow:]

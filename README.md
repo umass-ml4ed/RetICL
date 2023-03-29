@@ -30,6 +30,8 @@ TabMWP: https://github.com/lupantech/PromptPG/tree/main/data/tabmwp
 
 GSM8K: https://github.com/openai/grade-school-math
 
+SVAMP: https://github.com/arkilpatel/SVAMP
+
 Place those folders in this repo's root folder.
 
 ## Run

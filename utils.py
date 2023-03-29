@@ -26,7 +26,7 @@ class TrainOptions:
             raise Exception("RL algorithm not used with random or similarity sampling!")
         self.model_type: str = options_dict.get("model_type", ModelType.LSTM.value)
         self.model_name: Optional[str] = options_dict.get("model_name", None)
-        self.generator_model: str = options_dict.get("generator_model", "gpt3") # "EleutherAI/gpt-j-6B"
+        self.generator_model: str = options_dict.get("generator_model", "gpt3")
         self.gpt3_model: str = options_dict.get("gpt3_model", "code-davinci-002")
         self.encoder_model_type: str = options_dict.get("encoder_model_type", EncoderModelType.SBERT.value)
         self.encoder_model: str = options_dict.get("encoder_model", None)

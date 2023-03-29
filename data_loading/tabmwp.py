@@ -26,14 +26,14 @@ def tabmwp_get_data(split: str, options: TrainOptions):
     else:
         # Get evaluation samples from split and corpus from train set
         if split == "dev":
-            data = tabmwp_load_data("dev1k")[:200]
+            data = tabmwp_load_data("dev")[:200]
         elif split == "dev100":
             data = tabmwp_load_data("dev")[:100]
         else:
             data = tabmwp_load_data(split)
         corpus = tabmwp_load_data("train")
-        if split.startswith("test") and options.corpus_size != 0:
-            corpus = random.Random(221).sample(corpus, options.corpus_size)
+        # if split.startswith("test") and options.corpus_size != 0:
+        #     corpus = random.Random(221).sample(corpus, options.corpus_size)
     return data, corpus
 
 def tabmwp_process_sample(sample: dict) -> DataSample:
