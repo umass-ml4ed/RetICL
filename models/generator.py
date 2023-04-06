@@ -5,7 +5,10 @@ from typing import Dict, List
 import torch
 import torch.nn.functional as F
 from transformers import AutoModelForCausalLM, AutoTokenizer, StoppingCriteria, PreTrainedTokenizerBase
-import deepspeed
+try:
+    import deepspeed
+except ModuleNotFoundError:
+    pass
 
 from models.gpt3 import gpt3_completion_parallel, gpt3_completion_with_batching
 from utils import device, TrainOptions
@@ -39,7 +42,7 @@ class Generator:
     _model = None
     _model_ds = None
     _use_ds = False
-    _gen_batch_size = 10
+    _gen_batch_size = 0
     _tokenizer = None
     _max_tokens = 0
     _cache_filename = ""
@@ -55,6 +58,15 @@ class Generator:
             model_name = cls._model_name.replace("/", "-")
         cls._cache_filename = f"generator_cache_{cls.options.dataset}_{model_name}_ex{cls.options.num_examples}_mgt{cls.options.max_gen_tokens}.json"
         cls._cache = get_saved_cache(cls._cache_filename)
+        if cls.options.gen_batch_size:
+            cls._gen_batch_size = cls.options.gen_batch_size
+        else:
+            if cls._model_name == "gpt3":
+                cls._gen_batch_size = 5
+            elif "gpt-neox" in cls._model_name:
+                cls._gen_batch_size = 2
+            else:
+                cls._gen_batch_size = 10
         if cls._model_name != "gpt3":
             print("Loading generator model...")
             start_time = time.time()
@@ -63,7 +75,6 @@ class Generator:
                 cls._max_tokens = cls._model.config.n_positions
             else:
                 cls._max_tokens = cls._model.config.max_position_embeddings
-            cls._model = cls._model.to(device)
             cls._model.eval()
             cls._use_ds = "gpt-j" in cls._model_name or "gpt-neox" in cls._model_name
             if cls._use_ds:
@@ -74,10 +85,9 @@ class Generator:
                     replace_with_kernel_inject=True,
                     max_out_tokens=cls._max_tokens
                 )
+            cls._model = cls._model.to(device)
             cls._tokenizer = AutoTokenizer.from_pretrained(cls._model_name)
             cls._tokenizer.pad_token = cls._tokenizer.eos_token
-            if "gpt-neox" in cls._model_name:
-                cls._gen_batch_size = 2
             print(f"Model loaded ({time.time() - start_time:.2f}s)")
 
     @classmethod
@@ -93,7 +103,7 @@ class Generator:
     def get_nll(cls, prompts: List[str], labels: List[str], **kwargs):
         if cls._model_name == "gpt3":
             full_text = [prompt + label for prompt, label in zip(prompts, labels)]
-            results = gpt3_completion_with_batching(full_text, cls._gpt3_model_name, max_tokens=0, logprobs=1, echo=True)
+            results = gpt3_completion_with_batching(full_text, cls._gen_batch_size, cls._gpt3_model_name, max_tokens=0, logprobs=1, echo=True)
             nlls = []
             for result_idx, choice in enumerate(results):
                 for token_idx in range(len(choice["logprobs"]["tokens"]), -1, -1):
@@ -145,7 +155,7 @@ class Generator:
         if cls._model_name == "gpt3":
             uncached_prompts = [prompt for prompt in prompts if prompt not in cls._cache]
             if uncached_prompts:
-                results = gpt3_completion_with_batching(uncached_prompts, cls._gpt3_model_name, cls.options.max_gen_tokens)
+                results = gpt3_completion_with_batching(uncached_prompts, cls._gen_batch_size, cls._gpt3_model_name, cls.options.max_gen_tokens)
                 assert len(uncached_prompts) == len(results)
                 for prompt, result in zip(uncached_prompts, results):
                     if "gpt-3.5-turbo" in cls._gpt3_model_name:

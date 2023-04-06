@@ -6,8 +6,9 @@ import re
 from data_loading.data_types import DataSample
 from promptPG.base_prompt import get_table_text, get_question_text, get_answer, get_solution_text
 from promptPG.utilities import normalize_answer
-from constants import OPTION_INDS
 from utils import TrainOptions
+
+OPTION_INDS = ["A", "B", "C", "D", "E", "F"] # As defined in PromptPG code
 
 def tabmwp_load_data(split: str) -> List[dict]:
     with open(f"tabmwp/problems_{split}.json", encoding="utf-8") as data_file:
@@ -25,15 +26,12 @@ def tabmwp_get_data(split: str, options: TrainOptions):
         corpus = train_data[train_size : train_size + corpus_size]
     else:
         # Get evaluation samples from split and corpus from train set
-        if split == "dev":
-            data = tabmwp_load_data("dev")[:200]
-        elif split == "dev100":
-            data = tabmwp_load_data("dev")[:100]
-        else:
-            data = tabmwp_load_data(split)
+        data = tabmwp_load_data(split)
+        if options.val_size:
+            data = data[:options.val_size]
         corpus = tabmwp_load_data("train")
-        # if split.startswith("test") and options.corpus_size != 0:
-        #     corpus = random.Random(221).sample(corpus, options.corpus_size)
+        if options.val_corpus_size:
+            corpus = random.Random(221).sample(corpus, options.val_corpus_size)
     return data, corpus
 
 def tabmwp_process_sample(sample: dict) -> DataSample:

@@ -6,8 +6,6 @@ import re
 from data_loading.data_types import DataSample
 from utils import TrainOptions
 
-# TODO: might get better performance from training on asdiv and mawps as well
-
 def svamp_load_data() -> List[dict]:
     with open("SVAMP/SVAMP.json") as data_file:
         samples = json.load(data_file)
@@ -31,7 +29,11 @@ def svamp_get_data(split: str, options: TrainOptions):
             data = val_data
         elif split == "test":
             data = test_data
+        if options.val_size:
+            data = data[:options.val_size]
         corpus = train_data
+        if options.val_corpus_size:
+            corpus = random.Random(221).sample(corpus, options.val_corpus_size)
     return data, corpus
 
 def svamp_process_sample(sample: dict) -> DataSample:

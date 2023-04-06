@@ -24,12 +24,14 @@ def gsm8k_get_data(split: str, options: TrainOptions):
     else:
         # Get evaluation samples from split and corpus from train set
         if split == "dev":
-            data = val_data[:200]
-        elif split == "dev100":
-            data = val_data[:100]
+            data = val_data
         else:
             data = gsm8k_load_data(split)
+        if options.val_size:
+            data = data[:options.val_size]
         corpus = train_data
+        if options.val_corpus_size:
+            corpus = random.Random(221).sample(corpus, options.val_corpus_size)
     return data, corpus
 
 def gsm8k_process_sample(sample: dict) -> DataSample:

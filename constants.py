@@ -5,6 +5,7 @@ class Datasets(Enum):
     GSM8K = "gsm8k"
     MATH = "math"
     SVAMP = "svamp"
+    FEEDBACK = "feedback"
 
 class ModelType(Enum):
     RNN = "rnn"
@@ -29,6 +30,7 @@ class SamplingMethod(Enum):
     SIMILARITY = "sim"
     EPSILON_GREEDY = "eg"
     SOFTMAX = "softmax"
+    EXHAUSTIVE = "exhaustive"
 
 class Reward(Enum):
     PPL = "ppl"
@@ -42,6 +44,5 @@ class Init(Enum):
 MODEL_TO_EMB_SIZE = {
     "all-mpnet-base-v2": 768,
     "all-MiniLM-L12-v2": 384,
+    "all-distilroberta-v1": 768,
 }
-
-OPTION_INDS = ["A", "B", "C", "D", "E", "F"] # As defined in PromptPG code

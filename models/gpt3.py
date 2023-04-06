@@ -10,14 +10,12 @@ from openai.error import RateLimitError, Timeout, APIError, ServiceUnavailableEr
 api_keys = os.getenv("OPENAI_API_KEYS").split(",")
 cur_key_idx = 0
 
-delay_time = 5.0
+delay_time = 0.5
 decay_rate = 0.8
 
-MAX_BATCH_SIZE = 5
-
-def gpt3_completion_with_batching(prompts: List[str], model="code-davinci-002", max_tokens=400, logprobs=None, echo=False):
+def gpt3_completion_with_batching(prompts: List[str], max_batch_size=5, model="code-davinci-002", max_tokens=400, logprobs=None, echo=False):
     # Break up requests evenly among keys, using largest batch size possible
-    num_batches = math.ceil(len(prompts) / MAX_BATCH_SIZE)
+    num_batches = math.ceil(len(prompts) / max_batch_size)
     batch_size = math.ceil(len(prompts) / num_batches)
 
     results = []
@@ -26,11 +24,11 @@ def gpt3_completion_with_batching(prompts: List[str], model="code-davinci-002", 
         results += gpt3_completion(batch, model, max_tokens, logprobs, echo)
     return results
 
-def gpt3_completion_parallel(prompts: List[str], model="code-davinci-002", max_tokens=400, logprobs=None, echo=False):
+def gpt3_completion_parallel(prompts: List[str], max_batch_size=5, model="code-davinci-002", max_tokens=400, logprobs=None, echo=False):
     global cur_key_idx
 
     # Break up requests evenly among keys, using largest batch size possible
-    num_batches = math.ceil(len(prompts) / MAX_BATCH_SIZE)
+    num_batches = math.ceil(len(prompts) / max_batch_size)
     batch_size = math.ceil(len(prompts) / num_batches)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=num_batches) as executor:

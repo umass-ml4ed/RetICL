@@ -2,6 +2,7 @@ from abc import abstractmethod
 import torch
 from torch import nn
 
+from models.encoder import SBERTEncoder
 from utils import TrainOptions, is_pg
 from constants import MODEL_TO_EMB_SIZE, Init
 
@@ -21,11 +22,6 @@ class RetICLBase(nn.Module):
         self.bilinear = nn.Parameter(torch.empty((options.hidden_size, self.emb_size)))
         self.bias = nn.Parameter(torch.zeros((1)))
         self.value_fn_estimator = nn.Linear(options.hidden_size, 1)
-        if options.soft_prompt_len:
-            self.input_soft_prompt = nn.Parameter(torch.zeros((options.soft_prompt_len, self.emb_size)))
-            self.example_soft_prompt = nn.Parameter(torch.zeros((options.soft_prompt_len, self.emb_size)))
-            nn.init.normal_(self.input_soft_prompt, mean=0.0, std=1.0)
-            nn.init.normal_(self.example_soft_prompt, mean=0.0, std=1.0)
         if options.init == Init.ORTHOGONAL.value:
             nn.init.orthogonal_(self.bilinear, gain=1.0)
             orthogonal_init_(self.value_fn_estimator, gain=1.0)
@@ -33,6 +29,10 @@ class RetICLBase(nn.Module):
             # Follows pytorch Bilinear implementation
             init_bound = 1 / (options.hidden_size ** 0.5)
             nn.init.uniform_(self.bilinear, -init_bound, init_bound)
+        if options.soft_prompt_len:
+            self.encoder = SBERTEncoder(self.emb_size, options)
+        else:
+            self.encoder = None
 
     @abstractmethod
     def get_latent_states(self, current_sample_encodings: torch.Tensor, example_encodings: torch.Tensor, **kwargs) -> torch.Tensor:

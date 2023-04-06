@@ -17,7 +17,7 @@ def get_predictions(batch: CollatedBatch, check_correct: CheckCorrectFunction):
     # Generate predictions given retrieved context and check correctness
     predictions = Generator.generate(**batch)
     correct = torch.Tensor([
-        1 if check_correct(src_meta_data, pred) else 0
+        check_correct(src_meta_data, pred)
         for src_meta_data, pred in zip(batch["meta_data"], predictions)
     ])
     return predictions, correct
@@ -29,7 +29,6 @@ def get_rewards(batch: CollatedBatch, check_correct: CheckCorrectFunction, optio
         if options.reward == Reward.EXACT.value:
             # Reward is 1 if prediction is correct, -1 otherwise
             return 2 * correct - 1
-            # return correct
 
         if options.reward == Reward.EXACT_AND_BLEU.value:
             # Calculate bleu score on the generated solutions
@@ -43,7 +42,6 @@ def get_rewards(batch: CollatedBatch, check_correct: CheckCorrectFunction, optio
     # Reward is negative perplexity assigned to label given the context
     if options.reward == Reward.PPL.value:
         nlls = Generator.get_nll(**batch)
-        # return torch.exp(nlls)
         return 2 * torch.exp(-nlls) - 1
 
 def get_td_error(value_estimates: torch.Tensor, rewards: torch.Tensor):
@@ -85,7 +83,7 @@ def train_reticl(get_data: GetDataFunction, process_sample: ProcessDataFunction,
     else:
         val_est_model = None
     dataset = RetICLDataset(get_data, process_sample, train_split, retriever, options)
-    val_set = RetICLDataset(get_data, process_sample, dev_split, retriever, options)
+    val_set = RetICLDataset(get_data, process_sample, dev_split, retriever, options, False)
     val_set.set_greedy(True) # Use greedy retrieval for validation
     data_loader = DataLoader(
         dataset,
@@ -101,8 +99,13 @@ def train_reticl(get_data: GetDataFunction, process_sample: ProcessDataFunction,
         shuffle=False,
         drop_last=False
     )
-    params = list(retriever.parameters()) + list(val_est_model.parameters()) if options.sep_val_model else list(retriever.parameters())
-    optimizer = torch.optim.AdamW(params, lr=options.lr, weight_decay=options.wd)
+    all_named_params = list(retriever.named_parameters()) + list(val_est_model.named_parameters()) if options.sep_val_model else list(retriever.named_parameters())
+    retriever_params = [param for name, param in all_named_params if "encoder" not in name]
+    encoder_params = [param for name, param in all_named_params if "encoder" in name]
+    optimizer = torch.optim.AdamW([
+        {"params": retriever_params},
+        {"params": encoder_params, "lr": 5e-5}
+    ], lr=options.lr, weight_decay=options.wd)
     torch.autograd.set_detect_anomaly(True)
     print("Training...")
     previous_model = None # For PPO
@@ -118,30 +121,23 @@ def train_reticl(get_data: GetDataFunction, process_sample: ProcessDataFunction,
 
         # Update exploration parameters
         if options.sm == SamplingMethod.EPSILON_GREEDY.value:
-            dataset.update_epsilon(options.epsilon * options.expl_decay_rate ** epoch)
+            dataset.update_epsilon(options.eg_eps * options.expl_decay_rate ** epoch)
             print("Epsilon:", dataset.epsilon)
         elif options.rl_algo == RLAlgorithm.PPO.value:
-            # e_coef = options.e_coef * options.expl_decay_rate ** epoch
             e_coef = options.e_coef * max(1 - (1 - options.expl_decay_rate) * epoch / options.epochs, 0)
             print("Entropy Coefficient:", e_coef)
 
         # Sample batch from dataset - example retrieval is also done here (__getitem__ in RetICLDataset)
         for batch in tqdm(data_loader):
             batch_size, max_num_examples = batch["example_encodings"].shape[:2]
-            optimizer.zero_grad()
 
             # Calculate rewards for batch - only applied to final example in sequence
             rewards = get_rewards(batch, check_correct, options).to(device) # (N)
             rewards = F.pad(rewards.unsqueeze(1), (max_num_examples - 1, 0)) # (N x L)
 
             # Keep track of used examples
-            for sample_idx in range(batch_size):
-                for example_num, example_idx in enumerate(batch["policy_example_indices"][sample_idx]):
-                    # Add penalty for repeated examples
-                    # if example_idx.item() in train_example_set:
-                    #     penalty = (1 / max_num_examples) * (len(dataset) / len(dataset.corpus)) * .5
-                    #     rewards[sample_idx, example_num] -= penalty
-                    train_example_set.add(example_idx.item())
+            for example_idx in batch["policy_example_indices"].view(-1):
+                train_example_set.add(example_idx.item())
 
             # Calculate returns with reverse cumulative sum, assume gamma=1
             returns = torch.cumsum(rewards.flip(1), dim=1).flip(1).view(-1) # (N * L)
@@ -201,8 +197,7 @@ def train_reticl(get_data: GetDataFunction, process_sample: ProcessDataFunction,
                 advantage = get_gae(value_estimates, rewards)
 
                 # Get clip loss
-                epsilon = 0.1
-                clip_loss = -torch.min(ratio * advantage, torch.clip(ratio, 1 - epsilon, 1 + epsilon) * advantage)
+                clip_loss = -torch.min(ratio * advantage, torch.clip(ratio, 1 - options.ppo_eps, 1 + options.ppo_eps) * advantage)
 
                 # Get value function loss
                 vf_loss = torch.nn.MSELoss(reduction="none")(value_estimates, returns)
@@ -221,28 +216,37 @@ def train_reticl(get_data: GetDataFunction, process_sample: ProcessDataFunction,
                 raise Exception(f"Algorithm {options.rl_algo} not supported!")
             loss[loss_mask] = 0
             loss.mean().backward()
-            torch.nn.utils.clip_grad_norm_(params, options.grad_clip)
+            torch.nn.utils.clip_grad_norm_(retriever_params, options.grad_clip)
             optimizer.step()
+            optimizer.zero_grad()
+
+            # If training encoder, re-compute corpus encodings (after each training step)
+            if retriever.encoder is not None:
+                dataset.compute_corpus_encodings(False)
 
             total_reward += rewards.detach().cpu().numpy().sum()
             total_loss += loss.detach().cpu().numpy().sum()
             if vf_loss is not None:
                 total_vf_loss += vf_loss.detach().cpu().numpy().sum()
 
-        # Get average reward on validation set
-        val_reward = 0
-        val_entropy = None
-        for batch in tqdm(val_loader):
-            for example_idx in batch["policy_example_indices"].view(-1):
-                val_example_set.add(example_idx.item())
+        with torch.no_grad():
+            # Re-compute corpus encodings for validation set if training encoder
+            if retriever.encoder is not None:
+                val_set.compute_corpus_encodings()
 
-            rewards = get_rewards(batch, check_correct, options).to(device)
-            val_reward += rewards.detach().cpu().numpy().sum()
+            # Get average reward on validation set
+            val_reward = 0
+            val_entropy = None
+            for batch in tqdm(val_loader):
+                for example_idx in batch["policy_example_indices"].view(-1):
+                    val_example_set.add(example_idx.item())
 
-            if is_pg(options):
-                with torch.no_grad():
+                rewards = get_rewards(batch, check_correct, options).to(device)
+                val_reward += rewards.detach().cpu().numpy().sum()
+
+                if is_pg(options):
                     activations, _ = retriever(**batch)
-                val_entropy = get_entropy(activations)
+                    val_entropy = get_entropy(activations)
 
         # Report stats on current epoch
         avg_loss = total_loss / len(dataset)

@@ -1,4 +1,4 @@
-from typing import TypedDict, List, Optional, Callable, Tuple
+from typing import TypedDict, List, Optional, Callable, Tuple, Union
 import torch
 
 from utils import TrainOptions
@@ -14,4 +14,4 @@ class DataSample(TypedDict):
 
 GetDataFunction = Callable[[str, TrainOptions], Tuple[List[dict], Optional[List[dict]]]]
 ProcessDataFunction = Callable[[dict], DataSample]
-CheckCorrectFunction = Callable[[dict, str], bool]
+CheckCorrectFunction = Callable[[dict, str], Union[bool, float]]

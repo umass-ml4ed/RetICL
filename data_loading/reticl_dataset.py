@@ -11,6 +11,7 @@ import faiss
 
 from data_loading.data_types import DataSample, GetDataFunction, ProcessDataFunction
 from models.retriever import Retriever
+from models.encoder import SBERTEncoder
 from constants import SamplingMethod, EncoderModelType
 from utils import device, TrainOptions
 
@@ -41,7 +42,7 @@ class CollatedBatch(TypedDict):
 
 class RetICLDataset(TorchDataset):
     def __init__(self, get_data: GetDataFunction, process_sample: ProcessDataFunction,
-                 split: str, retriever: Optional[Retriever], options: TrainOptions):
+                 split: str, retriever: Optional[Retriever], options: TrainOptions, compute_intial_encodings: bool = True):
         super().__init__()
 
         self.options = options
@@ -59,27 +60,43 @@ class RetICLDataset(TorchDataset):
 
         # Compute encodings
         if options.sm != SamplingMethod.RANDOM.value:
-            if self.options.encoder_model_type == EncoderModelType.BERT.value:
-                self.encoder = BertModel.from_pretrained(self.options.encoder_model or "bert-base-cased").to(device)
-                self.tokenizer = AutoTokenizer.from_pretrained("bert-base-cased")
-            elif self.options.encoder_model_type == EncoderModelType.GPT2.value:
-                self.encoder = GPT2Model.from_pretrained(self.options.encoder_model or "gpt2").to(device)
-                self.tokenizer = AutoTokenizer.from_pretrained("gpt2")
-                self.tokenizer.pad_token = self.tokenizer.eos_token
+            if retriever is not None and retriever.encoder is not None:
+                # We have a trainable encoder, so encodings are computed on the fly
+                self.trainable_encoder = True
+                self.encoder = retriever.encoder
+                if compute_intial_encodings:
+                    self.compute_corpus_encodings()
             else:
-                self.encoder = SentenceTransformer(self.options.encoder_model or "all-mpnet-base-v2")
-            self.compute_encodings()
+                # We have a static encoder, so compute encodings now
+                self.trainable_encoder = False
+                if self.options.encoder_model_type == EncoderModelType.BERT.value:
+                    self.encoder = BertModel.from_pretrained(self.options.encoder_model or "bert-base-cased").to(device)
+                    self.tokenizer = AutoTokenizer.from_pretrained("bert-base-cased")
+                elif self.options.encoder_model_type == EncoderModelType.GPT2.value:
+                    self.encoder = GPT2Model.from_pretrained(self.options.encoder_model or "gpt2").to(device)
+                    self.tokenizer = AutoTokenizer.from_pretrained("gpt2")
+                    self.tokenizer.pad_token = self.tokenizer.eos_token
+                else:
+                    self.encoder = SentenceTransformer(self.options.encoder_model or "all-distilroberta-v1")
+                self.compute_encodings()
 
-    def batch_encode(self, samples: List[DataSample], inc_label: bool):
+    def batch_encode(self, samples: List[DataSample], inc_label: bool, show_progress: bool = True):
         batch_size = 10
-        for batch_start_idx in tqdm(range(0, len(samples), batch_size)):
+        it = range(0, len(samples), batch_size)
+        if show_progress:
+            it = tqdm(it)
+        for batch_start_idx in it:
             batch = samples[batch_start_idx : batch_start_idx + batch_size]
             if self.options.encoder_model_type == EncoderModelType.SBERT.value:
                 seq_strings = [
                     (sample["encoder_context"] + sample["encoder_label"]) if inc_label else sample["encoder_context"]
                     for sample in batch
                 ]
-                outputs = self.encoder.encode(seq_strings, convert_to_tensor=True)
+                if self.trainable_encoder:
+                    assert isinstance(self.encoder, SBERTEncoder)
+                    outputs = self.encoder.encode(seq_strings, inc_label)
+                else:
+                    outputs = self.encoder.encode(seq_strings, convert_to_tensor=True, normalize_embeddings=True)
             elif self.options.encoder_model_type == EncoderModelType.BERT.value:
                 inputs = self.tokenizer(
                     [sample["encoder_context"] for sample in batch],
@@ -104,6 +121,11 @@ class RetICLDataset(TorchDataset):
                 else:
                     sample["context_encoding"] = encoding
 
+    def compute_corpus_encodings(self, show_progress: bool = True):
+        self.batch_encode(self.corpus, True, show_progress)
+        self.encoding_matrix = torch.stack([sample["full_encoding"] for sample in self.corpus]).to(device)
+        self.emb_size = self.encoding_matrix.shape[1]
+
     def compute_encodings(self):
         print("Encoding samples...")
 
@@ -116,12 +138,13 @@ class RetICLDataset(TorchDataset):
             else:
                 self.batch_encode(self.corpus, True)
                 self.encoding_matrix = torch.stack([sample["full_encoding"] for sample in self.corpus]).to(device)
+        self.emb_size = self.encoding_matrix.shape[1]
 
         # Construct index for sample lookup
-        self.emb_size = self.encoding_matrix.shape[1]
-        encoding_matrix_np = self.encoding_matrix.cpu().numpy()
-        self.index = faiss.IndexFlatL2(self.emb_size)
-        self.index.add(encoding_matrix_np)
+        if self.options.sm == SamplingMethod.SIMILARITY.value:
+            encoding_matrix_np = self.encoding_matrix.cpu().numpy()
+            self.index = faiss.IndexFlatL2(self.emb_size)
+            self.index.add(encoding_matrix_np)
 
     def update_epsilon(self, epsilon: float):
         self.epsilon = epsilon
@@ -129,24 +152,20 @@ class RetICLDataset(TorchDataset):
     def set_greedy(self, greedy: bool):
         self.greedy = greedy
 
-    def _get_top_unused_example(self, qv: torch.Tensor, used_idxs: List[int]):
-        top_examples = self.index.search(
-            qv.unsqueeze(0).cpu().numpy(),
-            1 + len(used_idxs)
-        )[1][0]
-        for used_idx in used_idxs:
-            top_examples = top_examples[top_examples != used_idx]
-        return top_examples[0]
-
     def __getitem__(self, index: int) -> ICLSample:
+        # Set retriever to eval mode if using it
         training = self.retriever and self.retriever.training
         if training:
             self.retriever.eval()
 
-        with torch.no_grad():
-            # Get current sample
-            cur_sample = self.data[index]
+        # Get current sample
+        cur_sample = self.data[index]
 
+        # Re-compute current sample encoding if using trainable encoder
+        if self.trainable_encoder:
+            self.batch_encode([cur_sample], False, False)
+
+        with torch.no_grad():
             prompt = ""
             examples: List[DataSample] = []
             used_idxs: List[int] = []
@@ -165,6 +184,8 @@ class RetICLDataset(TorchDataset):
                     cur_sample["context_encoding"].unsqueeze(0).cpu().numpy(), self.options.num_examples + 1)[1][0]
                 if corp_eq_data:
                     top_neighbor_indices = top_neighbor_indices[top_neighbor_indices != index]
+                top_neighbor_indices = top_neighbor_indices[:self.options.num_examples]
+                # top_neighbor_indices = np.flip(top_neighbor_indices)
             # Keep track of example encodings for retriever
             if self.options.sm in (SamplingMethod.RANDOM.value, SamplingMethod.SIMILARITY.value):
                 example_encodings = None
@@ -180,7 +201,9 @@ class RetICLDataset(TorchDataset):
                             current_sample_encoding=cur_sample["context_encoding"],
                             example_encodings=example_encodings,
                         )
-                        example_idx = self._get_top_unused_example(qv, used_idxs)
+                        activations = torch.matmul(qv, self.encoding_matrix.T)
+                        activations[used_idxs] = -torch.inf
+                        example_idx = torch.argmax(activations).item()
                     else:
                         example_idx = random_example_idxs[0]
                 elif self.options.sm == SamplingMethod.SOFTMAX.value:
@@ -190,11 +213,12 @@ class RetICLDataset(TorchDataset):
                         example_encodings=example_encodings,
                     )
                     if self.greedy:
-                        example_idx = self._get_top_unused_example(qv, used_idxs)
+                        activations = torch.matmul(qv, self.encoding_matrix.T)
+                        activations[used_idxs] = -torch.inf
+                        example_idx = torch.argmax(activations).item()
                     else:
                         # Randomly sample an example from the policy
                         activations = torch.matmul(qv, self.encoding_matrix.T)
-                        # TODO: make sure no grads on self.encoding_matrix here
                         activations[used_idxs] = -torch.inf
                         if self.options.top_k:
                             _, top_k_act_idxs = torch.topk(activations, self.options.top_k)
@@ -221,6 +245,7 @@ class RetICLDataset(TorchDataset):
                     example_encoding = example["full_encoding"]
                     example_encodings = torch.cat([example_encodings, example_encoding.unsqueeze(0).to(device)], dim=0)
 
+        # Set retriever back to training mode if necessary
         if training:
             self.retriever.train()
 
