@@ -1,7 +1,7 @@
 import json
 import os
 import time
-from typing import Dict, List
+from typing import Dict, List, TypedDict
 import torch
 import torch.nn.functional as F
 from transformers import AutoModelForCausalLM, AutoTokenizer, StoppingCriteria, PreTrainedTokenizerBase
@@ -12,6 +12,10 @@ except ModuleNotFoundError:
 
 from models.gpt3 import gpt3_completion_parallel, gpt3_completion_with_batching
 from utils import device, TrainOptions
+
+class GeneratorResult(TypedDict):
+    text: str
+    nll: float
 
 def get_saved_cache(cache_filename: str):
     if os.path.exists(cache_filename):
@@ -36,7 +40,7 @@ class NLStoppingCriteria(StoppingCriteria):
 
 class Generator:
     options = None
-    _cache: Dict[str, str] = {}
+    _cache: Dict[str, GeneratorResult] = {}
     _model_name = ""
     _gpt3_model_name = ""
     _model = None
@@ -88,16 +92,16 @@ class Generator:
             cls._model = cls._model.to(device)
             cls._tokenizer = AutoTokenizer.from_pretrained(cls._model_name)
             cls._tokenizer.pad_token = cls._tokenizer.eos_token
-            print(f"Model loaded ({time.time() - start_time:.2f}s)")
+            print(f"Generator model loaded ({time.time() - start_time:.2f}s)")
 
     @classmethod
     def save_cached(cls):
         # Get updates from other processes and then save whole thing
         temp_cache = get_saved_cache(cls._cache_filename)
-        cls._cache.update(temp_cache)
-        print(f"Saving cache ({len(cls._cache)} entries)...")
+        temp_cache.update(cls._cache)
+        print(f"Saving cache ({len(temp_cache)} entries)...")
         with open(cls._cache_filename, "w", encoding="utf-8") as cache_file:
-            json.dump(cls._cache, cache_file, indent=2, ensure_ascii=False)
+            json.dump(temp_cache, cache_file, indent=2, ensure_ascii=False)
 
     @classmethod
     def get_nll(cls, prompts: List[str], labels: List[str], **kwargs):
@@ -106,11 +110,20 @@ class Generator:
             results = gpt3_completion_with_batching(full_text, cls._gen_batch_size, cls._gpt3_model_name, max_tokens=0, logprobs=1, echo=True)
             nlls = []
             for result_idx, choice in enumerate(results):
-                for token_idx in range(len(choice["logprobs"]["tokens"]), -1, -1):
-                    if choice["logprobs"]["tokens"][token_idx - 1] == ":" and\
-                        choice["logprobs"]["tokens"][token_idx - 2] == "Solution":
+                # Find index in tokens where label begins and average per-token nlls thereafter
+                prompt_len = len(prompts[result_idx].encode())
+                prompt = bytes()
+                for token_idx, token in enumerate(choice["logprobs"]["tokens"]):
+                    if token.startswith("bytes:"):
+                        # Convert literal byte representation to actual bytes object
+                        # https://stackoverflow.com/questions/41552839/how-can-i-convert-literal-escape-sequences-in-a-string-to-the-corresponding-byte
+                        prompt += token[6:].encode().decode("unicode_escape").encode("latin-1")
+                    else:
+                        prompt += token.encode()
+                    if len(prompt) > prompt_len:
                         nlls.append(-torch.tensor(choice["logprobs"]["token_logprobs"][token_idx:]).mean())
                         break
+
             return torch.stack(nlls)
 
         cls._tokenizer.padding_side = "right"
@@ -153,21 +166,27 @@ class Generator:
     @classmethod
     def generate(cls, prompts: List[str], **kwargs):
         if cls._model_name == "gpt3":
-            uncached_prompts = [prompt for prompt in prompts if prompt not in cls._cache]
+            uncached_prompts = [prompt for prompt in prompts if prompt not in cls._cache or isinstance(cls._cache[prompt], str)]
             if uncached_prompts:
-                results = gpt3_completion_with_batching(uncached_prompts, cls._gen_batch_size, cls._gpt3_model_name, cls.options.max_gen_tokens)
+                results = gpt3_completion_with_batching(uncached_prompts, cls._gen_batch_size, cls._gpt3_model_name, cls.options.max_gen_tokens, logprobs=1)
                 assert len(uncached_prompts) == len(results)
                 for prompt, result in zip(uncached_prompts, results):
                     if "gpt-3.5-turbo" in cls._gpt3_model_name:
-                        cls._cache[prompt] = result["message"]["content"]
+                        cls._cache[prompt] = {
+                            "text": result["message"]["content"],
+                            "nll": None
+                        }
                     else:
-                        cls._cache[prompt] = result["text"]
+                        cls._cache[prompt] = {
+                            "text": result["text"],
+                            "nll": -torch.tensor(result["logprobs"]["token_logprobs"]).mean().item()
+                        }
         else:
             torch.use_deterministic_algorithms(False) # Don't use deterministic algorithms to speed up generation
             with torch.no_grad():
                 cls._tokenizer.padding_side = "left"
                 if cls._use_ds:
-                    uncached_prompts = [prompt for prompt in prompts if prompt not in cls._cache]
+                    uncached_prompts = [prompt for prompt in prompts if prompt not in cls._cache or isinstance(cls._cache[prompt], str)]
                     if uncached_prompts:
                         for start_idx in range(0, len(uncached_prompts), cls._gen_batch_size):
                             batch = uncached_prompts[start_idx : start_idx + cls._gen_batch_size]
@@ -191,7 +210,10 @@ class Generator:
                                 first_nl = pred.find("\n\n")
                                 if first_nl != -1:
                                     pred = pred[:first_nl]
-                                cls._cache[prompt] = pred
+                                cls._cache[prompt] = {
+                                    "text": pred,
+                                    "nll": None
+                                }
                 else:
                     for prompt in prompts:
                         if prompt in cls._cache:
@@ -215,7 +237,10 @@ class Generator:
                         first_nl = pred.find("\n\n")
                         if first_nl != -1:
                             pred = pred[:first_nl]
-                        cls._cache[prompt] = pred
+                        cls._cache[prompt] = {
+                            "text": pred,
+                            "nll": None
+                        }
             torch.use_deterministic_algorithms(cls.options.deterministic, warn_only=True) # Set determinism back
         return [cls._cache[prompt] for prompt in prompts]
 

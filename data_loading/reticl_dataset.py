@@ -59,6 +59,7 @@ class RetICLDataset(TorchDataset):
             self.corpus = self.data
 
         # Compute encodings
+        self.trainable_encoder = False
         if options.sm != SamplingMethod.RANDOM.value:
             if retriever is not None and retriever.encoder is not None:
                 # We have a trainable encoder, so encodings are computed on the fly
@@ -68,7 +69,6 @@ class RetICLDataset(TorchDataset):
                     self.compute_corpus_encodings()
             else:
                 # We have a static encoder, so compute encodings now
-                self.trainable_encoder = False
                 if self.options.encoder_model_type == EncoderModelType.BERT.value:
                     self.encoder = BertModel.from_pretrained(self.options.encoder_model or "bert-base-cased").to(device)
                     self.tokenizer = AutoTokenizer.from_pretrained("bert-base-cased")

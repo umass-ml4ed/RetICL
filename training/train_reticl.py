@@ -1,3 +1,4 @@
+import os
 import torch
 from torch.utils.data import DataLoader
 import torch.nn.functional as F
@@ -17,29 +18,34 @@ def get_predictions(batch: CollatedBatch, check_correct: CheckCorrectFunction):
     # Generate predictions given retrieved context and check correctness
     predictions = Generator.generate(**batch)
     correct = torch.Tensor([
-        check_correct(src_meta_data, pred)
+        check_correct(src_meta_data, pred["text"])
         for src_meta_data, pred in zip(batch["meta_data"], predictions)
     ])
     return predictions, correct
 
 def get_rewards(batch: CollatedBatch, check_correct: CheckCorrectFunction, options: TrainOptions):
-    if options.reward in (Reward.EXACT.value, Reward.EXACT_AND_BLEU.value):
+    if options.reward in (Reward.EXACT.value, Reward.EXACT_AND_PPL.value, Reward.EXACT_AND_BLEU.value):
         predictions, correct = get_predictions(batch, check_correct)
 
         if options.reward == Reward.EXACT.value:
             # Reward is 1 if prediction is correct, -1 otherwise
             return 2 * correct - 1
 
+        if options.reward == Reward.EXACT_AND_PPL.value:
+            ppl_weight = .5
+            ppl = torch.tensor([-pred["nll"] for pred in predictions]).exp()
+            return 2 * (correct * (1 - ppl_weight) + ppl * ppl_weight) - 1
+
         if options.reward == Reward.EXACT_AND_BLEU.value:
             # Calculate bleu score on the generated solutions
             bleu = torch.Tensor([
-                nltk.translate.bleu([target], pred)
+                nltk.translate.bleu([target], pred["text"])
                 for pred, target in zip (predictions, batch["labels"])
             ])
             # Half of reward comes from bleu and other half from final correctness
             return correct + bleu - 1
 
-    # Reward is negative perplexity assigned to label given the context
+    # Reward is inverse perplexity assigned to label given the context
     if options.reward == Reward.PPL.value:
         nlls = Generator.get_nll(**batch)
         return 2 * torch.exp(-nlls) - 1
@@ -75,13 +81,29 @@ def train_reticl(get_data: GetDataFunction, process_sample: ProcessDataFunction,
         run = wandb.init(project="reticl", config=options.as_dict())
     else:
         run = None
+
+    # Load checkpoint
+    checkpoint_path = f"{options.model_name}_ckpt.pt"
+    if os.path.exists(checkpoint_path):
+        print("Loading checkpoint...")
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+    else:
+        checkpoint = None
+
+    # Create/load model
     retriever = retriever_model(options)
+    if checkpoint:
+        retriever.load_state_dict(checkpoint["retriever"])
     retriever.train()
     if options.sep_val_model:
         val_est_model = retriever_model(options)
+        if checkpoint:
+            val_est_model.load_state_dict(checkpoint["val_est"])
         val_est_model.train()
     else:
         val_est_model = None
+
+    # Create train/val datasets/loaders
     dataset = RetICLDataset(get_data, process_sample, train_split, retriever, options)
     val_set = RetICLDataset(get_data, process_sample, dev_split, retriever, options, False)
     val_set.set_greedy(True) # Use greedy retrieval for validation
@@ -99,20 +121,28 @@ def train_reticl(get_data: GetDataFunction, process_sample: ProcessDataFunction,
         shuffle=False,
         drop_last=False
     )
+
+    # Setup optimizer
     all_named_params = list(retriever.named_parameters()) + list(val_est_model.named_parameters()) if options.sep_val_model else list(retriever.named_parameters())
     retriever_params = [param for name, param in all_named_params if "encoder" not in name]
     encoder_params = [param for name, param in all_named_params if "encoder" in name]
     optimizer = torch.optim.AdamW([
         {"params": retriever_params},
-        {"params": encoder_params, "lr": 5e-5}
+        {"params": encoder_params, "lr": options.encoder_lr}
     ], lr=options.lr, weight_decay=options.wd)
-    torch.autograd.set_detect_anomaly(True)
+    if checkpoint:
+        optimizer.load_state_dict(checkpoint["optimizer"])
+
     print("Training...")
+    torch.autograd.set_detect_anomaly(True)
     previous_model = None # For PPO
     best_model = retriever_model(options)
-    best_reward = None
+    best_val_accuracy = None
     e_coef = 0.0
-    for epoch in range(options.epochs):
+    if checkpoint:
+        torch.random.set_rng_state(checkpoint["rng_state"].cpu())
+    starting_epoch = 0 if checkpoint is None else checkpoint["epoch"]
+    for epoch in range(starting_epoch, options.epochs):
         total_reward = 0
         total_loss = 0
         total_vf_loss = 0
@@ -216,7 +246,7 @@ def train_reticl(get_data: GetDataFunction, process_sample: ProcessDataFunction,
                 raise Exception(f"Algorithm {options.rl_algo} not supported!")
             loss[loss_mask] = 0
             loss.mean().backward()
-            torch.nn.utils.clip_grad_norm_(retriever_params, options.grad_clip)
+            torch.nn.utils.clip_grad_norm_(retriever_params + encoder_params, options.grad_clip)
             optimizer.step()
             optimizer.zero_grad()
 
@@ -236,6 +266,7 @@ def train_reticl(get_data: GetDataFunction, process_sample: ProcessDataFunction,
 
             # Get average reward on validation set
             val_reward = 0
+            val_correct = 0
             val_entropy = None
             for batch in tqdm(val_loader):
                 for example_idx in batch["policy_example_indices"].view(-1):
@@ -243,6 +274,8 @@ def train_reticl(get_data: GetDataFunction, process_sample: ProcessDataFunction,
 
                 rewards = get_rewards(batch, check_correct, options).to(device)
                 val_reward += rewards.detach().cpu().numpy().sum()
+                _, correct = get_predictions(batch, check_correct)
+                val_correct += correct.detach().cpu().numpy().sum()
 
                 if is_pg(options):
                     activations, _ = retriever(**batch)
@@ -252,6 +285,7 @@ def train_reticl(get_data: GetDataFunction, process_sample: ProcessDataFunction,
         avg_loss = total_loss / len(dataset)
         avg_reward = total_reward / len(dataset)
         avg_val_reward = val_reward / len(val_set)
+        avg_val_accuracy = val_correct and val_correct / len(val_set)
         avg_vf_loss = total_vf_loss / (len(dataset) * max_num_examples) if vf_loss is not None else None
         if run:
             run.log({
@@ -259,6 +293,7 @@ def train_reticl(get_data: GetDataFunction, process_sample: ProcessDataFunction,
                 "vf_loss": avg_vf_loss,
                 "reward": avg_reward,
                 "val_reward": avg_val_reward,
+                "val_accuracy": avg_val_accuracy,
                 "train_examples": len(train_example_set),
                 "val_examples": len(val_example_set),
                 "val_entropy": val_entropy,
@@ -267,13 +302,25 @@ def train_reticl(get_data: GetDataFunction, process_sample: ProcessDataFunction,
         print(f"Epoch {epoch + 1}, Loss: {avg_loss:.4f}, Reward: {avg_reward:.4f}, Val Reward: {avg_val_reward:.4f}, "
               f"Train Examples: {len(train_example_set)}, Val Examples: {len(val_example_set)}")
 
+        # Save checkpoint
+        # Commented since not properly resuming
+        # torch.save({
+        #     "retriever": retriever.state_dict(),
+        #     "val_est": val_est_model.state_dict() if val_est_model is not None else None,
+        #     "optimizer": optimizer.state_dict(),
+        #     "rng_state": torch.random.get_rng_state(),
+        #     "epoch": epoch + 1,
+        # }, checkpoint_path)
+
         # Save model with best reward on validation set
-        if best_reward is None or avg_val_reward > best_reward:
-            best_reward = avg_val_reward
-            print("Best!")
+        if best_val_accuracy is None or avg_val_accuracy > best_val_accuracy:
+            best_val_accuracy = avg_val_accuracy
+            print("Best! Saving model...")
             best_model.load_state_dict(retriever.state_dict())
+            torch.save(best_model.state_dict(), f"{options.model_name}.pt")
 
     # Save and evaluate final model
     final_model = best_model if options.save_best else retriever
-    torch.save(final_model.state_dict(), f"{options.model_name}.pt")
+    if not options.save_best:
+        torch.save(final_model.state_dict(), f"{options.model_name}.pt")
     evaluate_reticl(run, get_data, process_sample, check_correct, final_model, dev_split, options)

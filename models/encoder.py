@@ -20,18 +20,21 @@ class SBERTEncoder(nn.Module):
         model_name = "sentence-transformers/" + (options.encoder_model or "all-distilroberta-v1")
         self.max_len = max_sbert_len(model_name)
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        # TODO: register buffer for model
+        # TODO: if not ft_encoder, don't save with model params
         self.model = AutoModel.from_pretrained(model_name)
-        for param in self.model.parameters():
-            param.requires_grad = False
-        self.eos_embedding = self.model.get_input_embeddings()(torch.tensor([self.tokenizer.eos_token_id])).squeeze().to(device)
-        self.input_soft_prompt = nn.Parameter(torch.zeros((options.soft_prompt_len, emb_size)))
-        self.example_soft_prompt = nn.Parameter(torch.zeros((options.soft_prompt_len, emb_size)))
-        nn.init.normal_(self.input_soft_prompt, mean=0.0, std=1.0)
-        nn.init.normal_(self.example_soft_prompt, mean=0.0, std=1.0)
+        if not options.ft_encoder:
+            for param in self.model.parameters():
+                param.requires_grad = False
+        if options.soft_prompt_len:
+            self.eos_embedding = self.model.get_input_embeddings()(torch.tensor([self.tokenizer.eos_token_id])).squeeze().to(device)
+            self.input_soft_prompt = nn.Parameter(torch.zeros((options.soft_prompt_len, emb_size)))
+            self.example_soft_prompt = nn.Parameter(torch.zeros((options.soft_prompt_len, emb_size)))
+            nn.init.normal_(self.input_soft_prompt, mean=0.0, std=1.0)
+            nn.init.normal_(self.example_soft_prompt, mean=0.0, std=1.0)
 
     def encode(self, seq_strings: List[str], is_example: bool):
-        self.model.eval() # Don't use dropout
+        if not self.options.ft_encoder:
+            self.model.eval() # Don't use dropout
 
         # Get input tokens for given sequences
         encoded_input = self.tokenizer(

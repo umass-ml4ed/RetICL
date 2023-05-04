@@ -29,7 +29,7 @@ class RetICLBase(nn.Module):
             # Follows pytorch Bilinear implementation
             init_bound = 1 / (options.hidden_size ** 0.5)
             nn.init.uniform_(self.bilinear, -init_bound, init_bound)
-        if options.soft_prompt_len:
+        if options.ft_encoder or options.soft_prompt_len:
             self.encoder = SBERTEncoder(self.emb_size, options)
         else:
             self.encoder = None

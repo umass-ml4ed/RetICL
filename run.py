@@ -81,6 +81,8 @@ def main():
     parser.add_argument("--reward", type=str, choices=[reward.value for reward in Reward], help="Reward function")
     parser.add_argument("--encoder_model_type", type=str, choices=[emt.value for emt in EncoderModelType], help="Class of encoder model to use")
     parser.add_argument("--encoder_model", type=str, help="Pre-trained model for sample encoding")
+    parser.add_argument("--ft_encoder", type=bool_type, help="Fine-tune encoder model during training")
+    parser.add_argument("--encoder_lr", type=float, help="Learning rate for encoder fine-tuning")
     parser.add_argument("--soft_prompt_len", type=int, help="Length of encoder soft prompts")
     parser.add_argument("--hidden_size", type=int, help="Hidden size for RNN")
     parser.add_argument("--dropout", type=float, help="Dropout rate for RNN")

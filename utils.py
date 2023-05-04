@@ -31,6 +31,8 @@ class TrainOptions:
         self.gen_batch_size: int = options_dict.get("gen_batch_size", 0)
         self.encoder_model_type: str = options_dict.get("encoder_model_type", EncoderModelType.SBERT.value)
         self.encoder_model: str = options_dict.get("encoder_model", None)
+        self.ft_encoder: bool = options_dict.get("ft_encoder", False)
+        self.encoder_lr: float = options_dict.get("encoder_lr", 1e-3)
         self.soft_prompt_len: int = options_dict.get("soft_prompt_len", 0)
         self.train_size: int = options_dict.get("train_size", 1000)
         self.corpus_size: int = options_dict.get("corpus_size", 0)

@@ -35,6 +35,7 @@ class SamplingMethod(Enum):
 class Reward(Enum):
     PPL = "ppl"
     EXACT = "exact"
+    EXACT_AND_PPL = "exact_and_ppl"
     EXACT_AND_BLEU = "exact_and_bleu"
 
 class Init(Enum):

@@ -40,7 +40,7 @@ def exhaustive_eval(dataset: RetICLDataset, check_correct: CheckCorrectFunction,
         all_prompt_cands = get_all_prompts("", 0)
         for prompt_idx in range(0, len(all_prompt_cands), options.batch_size):
             prompt_cands = all_prompt_cands[prompt_idx : prompt_idx + options.batch_size]
-            pred_cands = Generator.generate(prompts=prompt_cands)
+            pred_cands = [pred["text"] for pred in Generator.generate(prompts=prompt_cands)]
             correct = [check_correct(meta_datas[-1], pred) for pred in pred_cands]
             if any(correct):
                 correct_found = True
@@ -74,7 +74,8 @@ def policy_eval(dataset: RetICLDataset, options: TrainOptions):
         prompts += batch["prompts"]
         labels += batch["labels"]
         meta_datas += batch["meta_data"]
-        preds += Generator.generate(**batch)
+        for pred in Generator.generate(**batch):
+            preds.append(pred["text"])
 
     return prompts, labels, meta_datas, preds, example_set
 
@@ -114,7 +115,10 @@ def evaluate_reticl(run, get_data: GetDataFunction, process_sample: ProcessDataF
         generator_model = options.generator_model.replace("/", "-")
         model_name = options.model_name if options.model_name else\
             f"{options.sm}_{generator_model}" + (f"_{options.gpt3_model}" if options.generator_model == "gpt3" else "")
-        out_filename = f"results_{options.dataset}_{split}_{model_name}_tex{options.num_examples}.csv"
+        out_filename = f"results_{options.dataset}_{split}_{model_name}_tex{options.num_examples}"
+        if options.val_corpus_size:
+            out_filename += f"_vcs{options.val_corpus_size}"
+        out_filename += ".csv"
         df = pandas.DataFrame({
             "prompt": prompts,
             "label": labels,
