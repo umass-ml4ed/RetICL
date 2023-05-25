@@ -49,7 +49,7 @@ def main():
     parser.add_argument("--eval", type=str, help="Evaluate downstream performance, provide dataset split as argument")
     parser.add_argument("--finetune_gpt2", action="store_true", help="Fine-tune GPT-2 encoder on dataset")
     parser.add_argument("--finetune_bert", action="store_true", help="Fine-tune BERT encoder on dataset")
-    parser.add_argument("--error_analysis", nargs=2, help="Perform error analysis on result files; provide two .csv result files")
+    parser.add_argument("--error_analysis", nargs=3, help="Perform error analysis on result files; provide two .csv result files")
     parser.add_argument("--viz", action="store_true", help="Visualize retriever latent states")
     # Training options
     parser.add_argument("--dataset", type=str, choices=[dataset.value for dataset in Datasets], help="Dataset to use")

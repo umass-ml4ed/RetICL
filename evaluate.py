@@ -115,7 +115,7 @@ def evaluate_reticl(run, get_data: GetDataFunction, process_sample: ProcessDataF
         generator_model = options.generator_model.replace("/", "-")
         model_name = options.model_name if options.model_name else\
             f"{options.sm}_{generator_model}" + (f"_{options.gpt3_model}" if options.generator_model == "gpt3" else "")
-        out_filename = f"results_{options.dataset}_{split}_{model_name}_tex{options.num_examples}"
+        out_filename = f"results_{options.dataset}_{split}_{model_name}_tex{options.num_examples}_mgt{options.max_gen_tokens}"
         if options.val_corpus_size:
             out_filename += f"_vcs{options.val_corpus_size}"
         out_filename += ".csv"
@@ -144,17 +144,18 @@ def answer_missing(df: pandas.DataFrame, dataset: str):
     indicator = "Final Answer: "
     return (len(df) - df["pred"].str.contains(indicator).sum()) / len(df)
 
-def error_analysis(result_file_1: str, result_file_2: str, arg_dict: dict):
+def error_analysis(title: str, result_file_1: str, result_file_2: str, arg_dict: dict):
     num_examples = 10
     df_1 = pandas.read_csv(result_file_1)
     df_2 = pandas.read_csv(result_file_2)
     # print("Pct left missing answer:", answer_missing(df_1, arg_dict["dataset"]))
     # print("Pct right missing answer:", answer_missing(df_2, arg_dict["dataset"]))
     df = df_1.join(df_2, lsuffix="_l", rsuffix="_r")
+    df = df[["prompt_l", "pred_l", "prompt_r", "pred_r", "label_l", "correct_l", "correct_r"]]
     left = df[df["correct_l"] > df["correct_r"]]
     right = df[df["correct_l"] < df["correct_r"]]
     both = df[(df["correct_l"] == 1) & (df["correct_r"] == 1)]
     neither = df[(df["correct_l"] == 0) & (df["correct_r"] == 0)]
-    # Trim each subset and concatenate
-    df = pandas.concat([left[:num_examples], right[:num_examples], both[:num_examples], neither[:num_examples]])
-    df.to_csv("error_analysis.csv")
+    for sub_title, sub_df in [("left", left), ("right", right), ("both", both), ("neither", neither)]:
+        print(sub_title, len(sub_df))
+        sub_df.to_csv(f"{title}_{sub_title}.csv")

@@ -59,4 +59,4 @@ python3 run.py --eval test --sm sim --dataset gsm8k
 
 ## External Code
 
-Please note that files in the `promptPG` folder are copied from the repo https://github.com/lupantech/PromptPG. These files exclusively relate to data processing. The associated license is copied to `promptPG/LICENSE.md`.
+Files in the `promptPG` folder are copied from the repo https://github.com/lupantech/PromptPG. The associated license is copied to `promptPG/LICENSE.md`.

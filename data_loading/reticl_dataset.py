@@ -42,7 +42,8 @@ class CollatedBatch(TypedDict):
 
 class RetICLDataset(TorchDataset):
     def __init__(self, get_data: GetDataFunction, process_sample: ProcessDataFunction,
-                 split: str, retriever: Optional[Retriever], options: TrainOptions, compute_intial_encodings: bool = True):
+                 split: str, retriever: Optional[Retriever], options: TrainOptions, compute_intial_encodings: bool = True,
+                 cached_encoding_matrix: Optional[torch.Tensor] = None):
         super().__init__()
 
         self.options = options
@@ -66,7 +67,7 @@ class RetICLDataset(TorchDataset):
                 self.trainable_encoder = True
                 self.encoder = retriever.encoder
                 if compute_intial_encodings:
-                    self.compute_corpus_encodings()
+                    self.compute_corpus_encodings(cached_encoding_matrix=cached_encoding_matrix)
             else:
                 # We have a static encoder, so compute encodings now
                 if self.options.encoder_model_type == EncoderModelType.BERT.value:
@@ -78,7 +79,7 @@ class RetICLDataset(TorchDataset):
                     self.tokenizer.pad_token = self.tokenizer.eos_token
                 else:
                     self.encoder = SentenceTransformer(self.options.encoder_model or "all-distilroberta-v1")
-                self.compute_encodings()
+                self.compute_encodings(cached_encoding_matrix=cached_encoding_matrix)
 
     def batch_encode(self, samples: List[DataSample], inc_label: bool, show_progress: bool = True):
         batch_size = 10
@@ -121,23 +122,29 @@ class RetICLDataset(TorchDataset):
                 else:
                     sample["context_encoding"] = encoding
 
-    def compute_corpus_encodings(self, show_progress: bool = True):
-        self.batch_encode(self.corpus, True, show_progress)
-        self.encoding_matrix = torch.stack([sample["full_encoding"] for sample in self.corpus]).to(device)
+    def compute_corpus_encodings(self, show_progress: bool = True, cached_encoding_matrix: torch.Tensor = None):
+        if cached_encoding_matrix is not None:
+            self.encoding_matrix = cached_encoding_matrix
+        else:
+            self.batch_encode(self.corpus, True, show_progress)
+            self.encoding_matrix = torch.stack([sample["full_encoding"] for sample in self.corpus]).to(device)
         self.emb_size = self.encoding_matrix.shape[1]
 
-    def compute_encodings(self):
+    def compute_encodings(self, cached_encoding_matrix: torch.Tensor = None):
         print("Encoding samples...")
 
         with torch.no_grad():
             self.batch_encode(self.data, False)
-            if self.options.sm == SamplingMethod.SIMILARITY.value:
-                if id(self.corpus) != id(self.data): # No need to re-encode context if corpus is same as data
-                    self.batch_encode(self.corpus, False)
-                self.encoding_matrix = torch.stack([sample["context_encoding"] for sample in self.corpus]).to(device)
+            if cached_encoding_matrix is not None:
+                self.encoding_matrix = cached_encoding_matrix
             else:
-                self.batch_encode(self.corpus, True)
-                self.encoding_matrix = torch.stack([sample["full_encoding"] for sample in self.corpus]).to(device)
+                if self.options.sm == SamplingMethod.SIMILARITY.value:
+                    if id(self.corpus) != id(self.data): # No need to re-encode context if corpus is same as data
+                        self.batch_encode(self.corpus, False)
+                    self.encoding_matrix = torch.stack([sample["context_encoding"] for sample in self.corpus]).to(device)
+                else:
+                    self.batch_encode(self.corpus, True)
+                    self.encoding_matrix = torch.stack([sample["full_encoding"] for sample in self.corpus]).to(device)
         self.emb_size = self.encoding_matrix.shape[1]
 
         # Construct index for sample lookup

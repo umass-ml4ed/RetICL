@@ -66,7 +66,7 @@ class Generator:
             cls._gen_batch_size = cls.options.gen_batch_size
         else:
             if cls._model_name == "gpt3":
-                cls._gen_batch_size = 5
+                cls._gen_batch_size = 10
             elif "gpt-neox" in cls._model_name:
                 cls._gen_batch_size = 2
             else:

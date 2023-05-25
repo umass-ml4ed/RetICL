@@ -1,4 +1,5 @@
 import re
+import os
 from collections import Counter
 import numpy as np
 import torch
@@ -10,6 +11,7 @@ from tqdm import tqdm
 from models.reticl_rnn import RetICLRNN
 from data_loading.data_types import GetDataFunction, ProcessDataFunction
 from data_loading.reticl_dataset import RetICLDataset, Collator
+from constants import Datasets
 from utils import TrainOptions, device
 
 def get_problem_class(solution: str):
@@ -21,10 +23,6 @@ def get_problem_class(solution: str):
         ("times", len(re.findall(r"<<[\d\.]+\*[\d\.]+=[\d\.]+>>", solution))),
         ("div", len(re.findall(r"<<[\d\.]+/[\d\.]+=[\d\.]+>>", solution))),
     )
-
-def get_transformed_encodings(retriever: RetICLRNN, dataset: RetICLDataset):
-    with torch.no_grad():
-        return torch.matmul(dataset.encoding_matrix, retriever.bilinear.T)
 
 def get_latent_states(retriever: RetICLRNN, dataset: RetICLDataset, options: TrainOptions):
     all_latent_states = []
@@ -47,7 +45,7 @@ def visualize_representations(get_data: GetDataFunction, process_sample: Process
     mode = "encodings"
 
     # Load model
-    if mode == "encodings":
+    if not options.model_name:
         retriever = None
     else:
         retriever = RetICLRNN(options).to(device)
@@ -55,16 +53,61 @@ def visualize_representations(get_data: GetDataFunction, process_sample: Process
         retriever.eval()
 
     # Load data
-    dataset = RetICLDataset(get_data, process_sample, "train", retriever, options)
+    cache_filename = f"reprs_{options.dataset}_{str(options.model_name).replace('/', '-')}_vcs{options.val_corpus_size}.pt"
+    if os.path.exists(cache_filename):
+        cached_encoding_matrix = torch.load(cache_filename)
+    else:
+        cached_encoding_matrix = None
+    dataset = RetICLDataset(get_data, process_sample, "test", retriever, options, cached_encoding_matrix=cached_encoding_matrix)
+    if cached_encoding_matrix is None:
+        torch.save(dataset.encoding_matrix, cache_filename)
     dataset.set_greedy(True)
     all_meta_data = [example["meta_data"] for example in dataset.corpus]
 
     # Group problem classes for visualization
-    all_problem_classes = [get_problem_class(example["meta_data"]["answer"]) for example in dataset.corpus]
-    problem_class_counter = Counter(all_problem_classes)
-    print(problem_class_counter.most_common())
-    classes_to_keep = 6
-    class_map = {pc: idx for idx, (pc, _) in enumerate(problem_class_counter.most_common(classes_to_keep))}
+    # all_problem_classes = [get_problem_class(example["meta_data"]["answer"]) for example in dataset.corpus]
+    # problem_class_counter = Counter(all_problem_classes)
+    # print(problem_class_counter.most_common())
+    # classes_to_keep = 6
+    # class_map = {pc: idx for idx, (pc, _) in enumerate(problem_class_counter.most_common(classes_to_keep))}
+    # cmap = [class_map.get(problem_class, classes_to_keep) for problem_class in all_problem_classes]
+
+    # age = [238,129,296,61,116,698]
+    # dist = [148,406,453,80,397]
+    # weight = [7,84,286]
+    # money = [353,100,540,114,161,91,81,597,375]
+    # cmap = []
+    # for idx in range(len(dataset.corpus)):
+    #     if idx in age:
+    #         cmap.append(1)
+    #     elif idx in dist:
+    #         cmap.append(2)
+    #     elif idx in weight:
+    #         cmap.append(3)
+    #     elif idx in money:
+    #         cmap.append(4)
+    #     else:
+    #         cmap.append(0)
+
+    # Number of steps
+    if options.dataset == Datasets.TABMWP.value:
+        cmap = [ex["encoder_label"].count("\\n") for ex in dataset.corpus]
+    else:
+        cmap = [ex["encoder_label"].count("\n") for ex in dataset.corpus]
+
+    # Number of unique operations
+    # cmap = []
+    # for ex in dataset.corpus:
+    #     num_ops = 0
+    #     if re.findall(r"<<[\d\.]+\+[\d\.]+=[\d\.]+>>", ex["meta_data"]["answer"]):
+    #         num_ops += 1
+    #     if re.findall(r"<<[\d\.]+-[\d\.]+=[\d\.]+>>", ex["meta_data"]["answer"]):
+    #         num_ops += 1
+    #     if re.findall(r"<<[\d\.]+\*[\d\.]+=[\d\.]+>>", ex["meta_data"]["answer"]):
+    #         num_ops += 1
+    #     if re.findall(r"<<[\d\.]+/[\d\.]+=[\d\.]+>>", ex["meta_data"]["answer"]):
+    #         num_ops += 1
+    #     cmap.append(num_ops)
 
     # Get representations to visualize
     if mode == "encodings":
@@ -76,20 +119,23 @@ def visualize_representations(get_data: GetDataFunction, process_sample: Process
         reprs = get_latent_states(retriever, dataset, options)
 
     # Reduce to 2 dimensions via T-SNE
-    tsne = TSNE(n_components=2, perplexity=40)
+    print(reprs.shape)
+    tsne = TSNE(n_components=2, perplexity=30, early_exaggeration=12)
     reprs_reduced = tsne.fit_transform(reprs.detach().cpu().numpy())
 
     # Show representations in scatter plots
     plt.scatter(
         reprs_reduced[:, 0],
         reprs_reduced[:, 1],
-        cmap="viridis",
-        c=[class_map.get(problem_class, classes_to_keep) for problem_class in all_problem_classes],
+        cmap="RdYlGn",
+        c=cmap,
         picker=True
     )
     def onpick(event):
         ind = event.ind[0]
-        print(all_meta_data[ind]["question"])
-        print(all_meta_data[ind]["answer"])
+        print(dataset.corpus[ind]["encoder_context"] + dataset.corpus[ind]["encoder_label"])
+        print(ind)
     plt.connect("pick_event", onpick)
+    plt.xticks([])
+    plt.yticks([])
     plt.show()

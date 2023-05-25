@@ -52,7 +52,7 @@ class TrainOptions:
         self.eg_eps: float = options_dict.get("eg_eps", 0.5)
         self.expl_decay_rate: float = options_dict.get("expl_decay_rate", 1.0)
         self.top_k: int = options_dict.get("top_k", 0)
-        self.reward: str = options_dict.get("reward", Reward.EXACT.value)
+        self.reward: str = options_dict.get("reward", Reward.EXACT_AND_PPL.value)
         self.hidden_size: int = options_dict.get("hidden_size", 800)
         self.dropout: float = options_dict.get("dropout", 0.0)
         self.v_coef: float = options_dict.get("v_coef", 0.5)

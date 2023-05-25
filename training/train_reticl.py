@@ -134,7 +134,7 @@ def train_reticl(get_data: GetDataFunction, process_sample: ProcessDataFunction,
         optimizer.load_state_dict(checkpoint["optimizer"])
 
     print("Training...")
-    torch.autograd.set_detect_anomaly(True)
+    # torch.autograd.set_detect_anomaly(True)
     previous_model = None # For PPO
     best_model = retriever_model(options)
     best_val_accuracy = None
