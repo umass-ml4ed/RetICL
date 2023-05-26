@@ -14,7 +14,7 @@ from data_loading.math import math_get_data, math_process_sample, math_check_cor
 from data_loading.svamp import svamp_get_data, svamp_process_sample, svamp_check_correct
 from data_loading.feedback import eedi_get_data, eedi_process_sample, eedi_check_correct
 from models.generator import GeneratorCM
-from constants import Datasets, RLAlgorithm, SamplingMethod, Reward, EncoderModelType, ModelType, Init
+from constants import Datasets, RLAlgorithm, SamplingMethod, Reward, EncoderModelType, ModelType, Pooling, Init
 from utils import initialize_seeds, device, TrainOptions
 
 def get_dataset_functions(options_dict: dict) -> Tuple[GetDataFunction, ProcessDataFunction, CheckCorrectFunction]:
@@ -81,6 +81,8 @@ def main():
     parser.add_argument("--reward", type=str, choices=[reward.value for reward in Reward], help="Reward function")
     parser.add_argument("--encoder_model_type", type=str, choices=[emt.value for emt in EncoderModelType], help="Class of encoder model to use")
     parser.add_argument("--encoder_model", type=str, help="Pre-trained model for sample encoding")
+    parser.add_argument("--encoder_h", type=int, help="Hidden size for encoder MLP; will not use MLP if not given")
+    parser.add_argument("--pool", type=str, choices=[p.value for p in Pooling], help="Method for encoder final layer pooling")
     parser.add_argument("--ft_encoder", type=bool_type, help="Fine-tune encoder model during training")
     parser.add_argument("--encoder_lr", type=float, help="Learning rate for encoder fine-tuning")
     parser.add_argument("--soft_prompt_len", type=int, help="Length of encoder soft prompts")

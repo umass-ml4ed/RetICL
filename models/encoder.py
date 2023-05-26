@@ -4,7 +4,8 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-from utils import device, TrainOptions, max_sbert_len
+from constants import MODEL_TO_EMB_SIZE, Pooling
+from utils import device, TrainOptions, max_sbert_len, orthogonal_init_
 
 def mean_pooling(token_embeddings, attention_mask):
     # Code taken from sbert docs: https://www.sbert.net/examples/applications/computing-embeddings/README.html
@@ -14,9 +15,10 @@ def mean_pooling(token_embeddings, attention_mask):
     return sum_embeddings / sum_mask
 
 class SBERTEncoder(nn.Module):
-    def __init__(self, emb_size: int, options: TrainOptions):
+    def __init__(self, options: TrainOptions):
         super().__init__()
         self.options = options
+        emb_size = MODEL_TO_EMB_SIZE.get(options.encoder_model, 768)
         model_name = "sentence-transformers/" + (options.encoder_model or "all-distilroberta-v1")
         self.max_len = max_sbert_len(model_name)
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -31,6 +33,14 @@ class SBERTEncoder(nn.Module):
             self.example_soft_prompt = nn.Parameter(torch.zeros((options.soft_prompt_len, emb_size)))
             nn.init.normal_(self.input_soft_prompt, mean=0.0, std=1.0)
             nn.init.normal_(self.example_soft_prompt, mean=0.0, std=1.0)
+        if options.pool == Pooling.ATTN.value:
+            self.attn_activator = nn.Linear(emb_size, 1, bias=False)
+        if options.encoder_h:
+            self.mlp = nn.Sequential(
+                nn.Linear(emb_size, options.encoder_h),
+                nn.ReLU()
+            )
+            orthogonal_init_(self.mlp)
 
     def encode(self, seq_strings: List[str], is_example: bool):
         if not self.options.ft_encoder:
@@ -64,10 +74,22 @@ class SBERTEncoder(nn.Module):
             attention_mask=attention_mask
         )[0]
 
-        # Get mean-pooled outputs
-        pooled_output = mean_pooling(token_embeddings, attention_mask)
+        # Get pooled outputs
+        if self.options.pool == Pooling.MEAN.value:
+            pooled_output = mean_pooling(token_embeddings, attention_mask)
+        elif self.options.pool == Pooling.ATTN.value:
+            attn_activations = self.attn_activator(token_embeddings).squeeze(2)
+            attn_activations[attention_mask == 0] = -torch.inf
+            attn_weights = torch.softmax(attn_activations, dim=-1)
+            pooled_output = torch.bmm(token_embeddings.transpose(2, 1), attn_weights.unsqueeze(2)).squeeze(2)
+        else:
+            raise Exception(f"{self.options.pool} pooling not supported")
 
         # Normalize so dot product yields fair comparison between candidates
         pooled_output = F.normalize(pooled_output, p=2, dim=1)
+
+        # Apply MLP
+        if self.options.encoder_h:
+            pooled_output = self.mlp(pooled_output)
 
         return pooled_output

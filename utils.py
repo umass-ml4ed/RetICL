@@ -2,8 +2,9 @@ from typing import Optional
 import random
 import numpy as np
 import torch
+from torch import nn
 
-from constants import Datasets, RLAlgorithm, SamplingMethod, Reward, EncoderModelType, ModelType, Init
+from constants import Datasets, RLAlgorithm, SamplingMethod, Reward, EncoderModelType, ModelType, Pooling, Init
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -31,6 +32,8 @@ class TrainOptions:
         self.gen_batch_size: int = options_dict.get("gen_batch_size", 0)
         self.encoder_model_type: str = options_dict.get("encoder_model_type", EncoderModelType.SBERT.value)
         self.encoder_model: str = options_dict.get("encoder_model", None)
+        self.encoder_h: int = options_dict.get("encoder_h", 0)
+        self.pool: str = options_dict.get("pool", Pooling.MEAN.value)
         self.ft_encoder: bool = options_dict.get("ft_encoder", False)
         self.encoder_lr: float = options_dict.get("encoder_lr", 1e-3)
         self.soft_prompt_len: int = options_dict.get("soft_prompt_len", 0)
@@ -76,3 +79,10 @@ def max_sbert_len(model_name: str):
     if "all-distilroberta-v1" in model_name:
         return 512
     raise Exception(f"Max len not defined for {model_name}!")
+
+def orthogonal_init_(module: nn.Module, gain: float = 1.0):
+    for name, param in module.named_parameters():
+        if "weight" in name:
+            nn.init.orthogonal_(param, gain=gain)
+        elif "bias" in name:
+            nn.init.constant_(param, 0.0)

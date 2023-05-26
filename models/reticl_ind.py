@@ -1,8 +1,8 @@
 import torch
 from torch import nn
 
-from models.reticl_base import RetICLBase, orthogonal_init_
-from utils import TrainOptions
+from models.reticl_base import RetICLBase
+from utils import TrainOptions, orthogonal_init_
 from constants import Init
 
 class RetICLInd(RetICLBase):

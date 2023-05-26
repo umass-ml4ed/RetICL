@@ -3,21 +3,14 @@ import torch
 from torch import nn
 
 from models.encoder import SBERTEncoder
-from utils import TrainOptions, is_pg
-from constants import MODEL_TO_EMB_SIZE, Init
-
-def orthogonal_init_(module: nn.Module, gain: float = 1.0):
-    for name, param in module.named_parameters():
-        if "weight" in name:
-            nn.init.orthogonal_(param, gain=gain)
-        elif "bias" in name:
-            nn.init.constant_(param, 0.0)
+from utils import TrainOptions, is_pg, orthogonal_init_
+from constants import MODEL_TO_EMB_SIZE, Init, Pooling
 
 class RetICLBase(nn.Module):
     def __init__(self, options: TrainOptions):
         super().__init__()
         self.options = options
-        self.emb_size = MODEL_TO_EMB_SIZE.get(options.encoder_model, 768)
+        self.emb_size = options.encoder_h or MODEL_TO_EMB_SIZE.get(options.encoder_model, 768)
         self.dropout = nn.Dropout(options.dropout)
         self.bilinear = nn.Parameter(torch.empty((options.hidden_size, self.emb_size)))
         self.bias = nn.Parameter(torch.zeros((1)))
@@ -29,8 +22,8 @@ class RetICLBase(nn.Module):
             # Follows pytorch Bilinear implementation
             init_bound = 1 / (options.hidden_size ** 0.5)
             nn.init.uniform_(self.bilinear, -init_bound, init_bound)
-        if options.ft_encoder or options.soft_prompt_len:
-            self.encoder = SBERTEncoder(self.emb_size, options)
+        if options.ft_encoder or options.soft_prompt_len or options.pool == Pooling.ATTN.value or options.encoder_h:
+            self.encoder = SBERTEncoder(options)
         else:
             self.encoder = None
 
@@ -55,6 +48,7 @@ class RetICLBase(nn.Module):
         if is_pg(self.options):
             # Compute activations over full corpus
             batch_size, max_num_examples = example_encodings.shape[:2]
+            # TODO: remove bias here
             activations = torch.matmul(query_vectors, all_example_encodings.T) + self.bias # (N * L x K)
             # Mask out previously used examples
             for used_example_idx in range(0, max_num_examples - 1):

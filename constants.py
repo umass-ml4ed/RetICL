@@ -38,6 +38,10 @@ class Reward(Enum):
     EXACT_AND_PPL = "exact_and_ppl"
     EXACT_AND_BLEU = "exact_and_bleu"
 
+class Pooling(Enum):
+    MEAN = "mean"
+    ATTN = "attn"
+
 class Init(Enum):
     DEFAULT = "default"
     ORTHOGONAL = "ortho"
