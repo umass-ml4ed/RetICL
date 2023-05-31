@@ -192,7 +192,8 @@ class RetICLDataset(TorchDataset):
                 if corp_eq_data:
                     top_neighbor_indices = top_neighbor_indices[top_neighbor_indices != index]
                 top_neighbor_indices = top_neighbor_indices[:self.options.num_examples]
-                # top_neighbor_indices = np.flip(top_neighbor_indices)
+                # Flip order to handle recency bias
+                top_neighbor_indices = np.flip(top_neighbor_indices)
             # Keep track of example encodings for retriever
             if self.options.sm in (SamplingMethod.RANDOM.value, SamplingMethod.SIMILARITY.value):
                 example_encodings = None
