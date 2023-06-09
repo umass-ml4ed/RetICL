@@ -22,6 +22,5 @@ class RetICLInd(RetICLBase):
         latent_states = h_0.repeat(1, num_examples).view(batch_size, num_examples, -1) # (N x L x H)
         return latent_states
 
-    def get_query_vector(self, current_sample_encoding: torch.Tensor, example_encodings: torch.Tensor):
-        h_0 = self.h_0_transform(current_sample_encoding)
-        return torch.matmul(h_0, self.bilinear)
+    def get_last_latent_state(self, current_sample_encoding: torch.Tensor, example_encodings: torch.Tensor):
+        return self.h_0_transform(current_sample_encoding)

@@ -44,6 +44,6 @@ class RetICLAttn(RetICLBase):
     def get_latent_states(self, current_sample_encodings: torch.Tensor, example_encodings: torch.Tensor, **kwargs):
         return self._get_latent_states(current_sample_encodings, example_encodings, False)
 
-    def get_query_vector(self, current_sample_encoding: torch.Tensor, example_encodings: torch.Tensor):
+    def get_last_latent_state(self, current_sample_encoding: torch.Tensor, example_encodings: torch.Tensor):
         latent_states = self._get_latent_states(current_sample_encoding.unsqueeze(0), example_encodings.unsqueeze(0), True)
-        return torch.matmul(latent_states[0, -1], self.bilinear)
+        return latent_states[0, -1]

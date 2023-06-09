@@ -159,6 +159,98 @@ class RetICLDataset(TorchDataset):
     def set_greedy(self, greedy: bool):
         self.greedy = greedy
 
+    def get_random_examples(self, index: int, corp_eq_data: bool):
+        random_example_idxs = np.array(random.sample(range(len(self.corpus)), self.options.num_examples + 1))
+        if corp_eq_data:
+            random_example_idxs = random_example_idxs[random_example_idxs != index]
+        random_example_idxs = random_example_idxs[:self.options.num_examples]
+        return random_example_idxs, None
+
+    def get_knn_examples(self, index: int, cur_sample: DataSample, corp_eq_data: bool):
+        top_neighbor_indices = self.index.search(
+            cur_sample["context_encoding"].unsqueeze(0).cpu().numpy(), self.options.num_examples + 1)[1][0]
+        if corp_eq_data:
+            top_neighbor_indices = top_neighbor_indices[top_neighbor_indices != index]
+        top_neighbor_indices = top_neighbor_indices[:self.options.num_examples]
+        # Flip order to handle recency bias
+        top_neighbor_indices = np.flip(top_neighbor_indices)
+        return top_neighbor_indices, None
+
+    def get_policy_sampled_examples(self, index: int, cur_sample: DataSample, corp_eq_data: bool):
+        example_idxs: List[int] = []
+        used_idxs: List[int] = []
+        if corp_eq_data:
+            used_idxs.append(index)
+        example_encodings = torch.empty((0, self.emb_size)).to(device)
+        random_example_idxs = self.get_random_examples(index, corp_eq_data)
+        while len(example_idxs) < self.options.num_examples:
+            qv = self.retriever.get_query_vector(
+                current_sample_encoding=cur_sample["context_encoding"],
+                example_encodings=example_encodings,
+            )
+            activations = torch.matmul(qv, self.encoding_matrix.T)
+            activations[used_idxs] = -torch.inf
+            if self.greedy:
+                torch.argmax(activations).item()
+            elif self.options.sm == SamplingMethod.EPSILON_GREEDY.value:
+                # If roll is above epsilon then sample from retriever, otherwise pick random sample
+                if random.random() > self.epsilon:
+                    example_idx = torch.argmax(activations).item()
+                else:
+                    example_idx = random_example_idxs[0]
+            elif self.options.sm == SamplingMethod.SOFTMAX.value:
+                # Sample from policy at current state
+                if self.options.top_k:
+                    _, top_k_act_idxs = torch.topk(activations, self.options.top_k)
+                    new_activations = torch.full_like(activations, -torch.inf)
+                    new_activations[top_k_act_idxs] = activations[top_k_act_idxs]
+                    activations = new_activations
+                pi_cur = torch.softmax(activations, dim=0)
+                example_idx = torch.multinomial(pi_cur, 1).item()
+            used_idxs.append(example_idx)
+            random_example_idxs = random_example_idxs[random_example_idxs != example_idx]
+            example_idxs.append(example_idx)
+            example_encoding = self.corpus[example_idx]["full_encoding"]
+            example_encodings = torch.cat([example_encodings, example_encoding.unsqueeze(0).to(device)], dim=0)
+        return example_idxs, example_encodings
+
+    def get_beam_search_examples(self, index: int, cur_sample: DataSample, corp_eq_data: bool):
+        beam_width = 1
+        beams = [{
+            "example_idxs": [],
+            "used_idxs": [index] if corp_eq_data else [],
+            "example_encodings": torch.empty((0, self.emb_size)).to(device),
+            "prob": 1.0,
+            "score": 0.0
+        }]
+        while len(beams[0]["example_idxs"]) < self.options.num_examples:
+            beam_cands = []
+            for beam in beams:
+                qv = self.retriever.get_query_vector(
+                    current_sample_encoding=cur_sample["context_encoding"],
+                    example_encodings=beam["example_encodings"],
+                )
+                activations = torch.matmul(qv, self.encoding_matrix.T)
+                activations[beam["used_idxs"]] = -torch.inf
+                pi_cur = torch.softmax(activations, dim=0)
+                _, example_idx_cands = torch.topk(activations, beam_width)
+                for example_idx in example_idx_cands:
+                    new_example_encodings = torch.cat([
+                        beam["example_encodings"],
+                        self.corpus[example_idx]["full_encoding"].unsqueeze(0).to(device)
+                    ], dim=0)
+                    val_estimate = self.retriever.get_last_vfe(cur_sample["context_encoding"], new_example_encodings)
+                    beam_cands.append({
+                        "example_idxs": beam["example_idxs"] + [example_idx.item()],
+                        "used_idxs": beam["used_idxs"] + [example_idx.item()],
+                        "example_encodings": new_example_encodings,
+                        "prob": beam["prob"] * pi_cur[example_idx].item(),
+                        "score": val_estimate
+                    })
+            beams = sorted(beam_cands, key=lambda beam: -beam["prob"])[:beam_width]
+        top_beam = sorted(beam_cands, key=lambda beam: -beam["prob"])[0]
+        return top_beam["example_idxs"], top_beam["example_encodings"]
+
     def __getitem__(self, index: int) -> ICLSample:
         # Set retriever to eval mode if using it
         training = self.retriever and self.retriever.training
@@ -172,86 +264,25 @@ class RetICLDataset(TorchDataset):
         if self.trainable_encoder:
             self.batch_encode([cur_sample], False, False)
 
+        # Don't resample current sample if corpus and training set are the same
+        corp_eq_data = id(self.corpus) == id(self.data)
+
+        # Get examples based on sampling method
         with torch.no_grad():
-            prompt = ""
-            examples: List[DataSample] = []
-            used_idxs: List[int] = []
-            policy_example_indices: List[int] = []
-            # Either sampling from original dataset or separate corpus
-            corp_eq_data = id(self.corpus) == id(self.data)
-            if corp_eq_data:
-                used_idxs.append(index)
-            # Group of examples to draw from when doing random sampling
-            random_example_idxs = np.array(random.sample(range(len(self.corpus)), self.options.num_examples + 1))
-            if corp_eq_data:
-                random_example_idxs = random_example_idxs[random_example_idxs != index]
-            # Group of examples to draw from when doing similarity sampling
-            if self.options.sm == SamplingMethod.SIMILARITY.value:
-                top_neighbor_indices = self.index.search(
-                    cur_sample["context_encoding"].unsqueeze(0).cpu().numpy(), self.options.num_examples + 1)[1][0]
-                if corp_eq_data:
-                    top_neighbor_indices = top_neighbor_indices[top_neighbor_indices != index]
-                top_neighbor_indices = top_neighbor_indices[:self.options.num_examples]
-                # Flip order to handle recency bias
-                top_neighbor_indices = np.flip(top_neighbor_indices)
-            # Keep track of example encodings for retriever
-            if self.options.sm in (SamplingMethod.RANDOM.value, SamplingMethod.SIMILARITY.value):
-                example_encodings = None
+            if self.options.sm == SamplingMethod.RANDOM.value:
+                example_idxs, example_encodings = self.get_random_examples(index, corp_eq_data)
+            elif self.options.sm == SamplingMethod.SIMILARITY.value:
+                example_idxs, example_encodings = self.get_knn_examples(index, cur_sample, corp_eq_data)
             else:
-                example_encodings = torch.empty((0, self.emb_size)).to(device)
+                if self.greedy:
+                    example_idxs, example_encodings = self.get_beam_search_examples(index, cur_sample, corp_eq_data)
+                else:
+                    example_idxs, example_encodings = self.get_policy_sampled_examples(index, cur_sample, corp_eq_data)
 
-            # Retrieve examples until context is full
-            while len(examples) < self.options.num_examples:
-                if self.options.sm == SamplingMethod.EPSILON_GREEDY.value:
-                    # If roll is above epsilon then sample from retriever, otherwise pick random sample
-                    if self.greedy or random.random() > self.epsilon:
-                        qv = self.retriever.get_query_vector(
-                            current_sample_encoding=cur_sample["context_encoding"],
-                            example_encodings=example_encodings,
-                        )
-                        activations = torch.matmul(qv, self.encoding_matrix.T)
-                        activations[used_idxs] = -torch.inf
-                        example_idx = torch.argmax(activations).item()
-                    else:
-                        example_idx = random_example_idxs[0]
-                elif self.options.sm == SamplingMethod.SOFTMAX.value:
-                    # Sample from policy at current state
-                    qv = self.retriever.get_query_vector(
-                        current_sample_encoding=cur_sample["context_encoding"],
-                        example_encodings=example_encodings,
-                    )
-                    if self.greedy:
-                        activations = torch.matmul(qv, self.encoding_matrix.T)
-                        activations[used_idxs] = -torch.inf
-                        example_idx = torch.argmax(activations).item()
-                    else:
-                        # Randomly sample an example from the policy
-                        activations = torch.matmul(qv, self.encoding_matrix.T)
-                        activations[used_idxs] = -torch.inf
-                        if self.options.top_k:
-                            _, top_k_act_idxs = torch.topk(activations, self.options.top_k)
-                            new_activations = torch.full_like(activations, -torch.inf)
-                            new_activations[top_k_act_idxs] = activations[top_k_act_idxs]
-                            activations = new_activations
-                        pi_cur = torch.softmax(activations, dim=0)
-                        example_idx = torch.multinomial(pi_cur, 1).item()
-                elif self.options.sm == SamplingMethod.RANDOM.value:
-                    example_idx = random_example_idxs[0]
-                elif self.options.sm == SamplingMethod.SIMILARITY.value:
-                    example_idx = top_neighbor_indices[len(examples)]
-
-                # Exclude current example from future selections
-                used_idxs.append(example_idx)
-                random_example_idxs = random_example_idxs[random_example_idxs != example_idx]
-
-                # Add retrieved example to the context
-                example = self.corpus[example_idx]
-                examples.append(example)
-                policy_example_indices.append(example_idx)
-                prompt += example["lm_context"] + example["lm_label"] + "\n\n"
-                if self.options.sm not in (SamplingMethod.RANDOM.value, SamplingMethod.SIMILARITY.value):
-                    example_encoding = example["full_encoding"]
-                    example_encodings = torch.cat([example_encodings, example_encoding.unsqueeze(0).to(device)], dim=0)
+        # Construct prompt
+        examples = [self.corpus[example_idx] for example_idx in example_idxs]
+        prompt = "\n\n".join([example["lm_context"] + example["lm_label"] for example in examples])
+        prompt += "\n\n" + cur_sample["lm_context"]
 
         # Set retriever back to training mode if necessary
         if training:
@@ -261,12 +292,12 @@ class RetICLDataset(TorchDataset):
             assert not any([id(ex) == id(cur_sample) for ex in examples])
 
         return {
-            "prompt": prompt + cur_sample["lm_context"],
+            "prompt": prompt,
             "label": cur_sample["lm_label"],
             "meta_data": cur_sample["meta_data"],
             "current_sample_encoding": cur_sample.get("context_encoding"),
             "example_encodings": example_encodings,
-            "policy_example_indices": policy_example_indices,
+            "policy_example_indices": example_idxs,
             "all_example_encodings": self.retriever and self.encoding_matrix,
         }
 

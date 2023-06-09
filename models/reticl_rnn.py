@@ -33,7 +33,7 @@ class RetICLRNN(RetICLBase):
         latent_states = torch.cat([h_0.unsqueeze(1), rnn_output[:, :-1]], dim=1) # (N x L x H)
         return latent_states
 
-    def get_query_vector(self, current_sample_encoding: torch.Tensor, example_encodings: torch.Tensor):
+    def get_last_latent_state(self, current_sample_encoding: torch.Tensor, example_encodings: torch.Tensor):
         h_0 = self.h_0_transform(current_sample_encoding)
         if example_encodings.shape[0] == 0:
             h_t = h_0
@@ -47,4 +47,4 @@ class RetICLRNN(RetICLBase):
             else:
                 _, h_t = self.rnn(example_encodings, h_0.unsqueeze(0))
             h_t = h_t.squeeze(0)
-        return torch.matmul(h_t, self.bilinear)
+        return h_t

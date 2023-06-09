@@ -32,8 +32,15 @@ class RetICLBase(nn.Module):
         raise NotImplementedError()
 
     @abstractmethod
-    def get_query_vector(self, current_sample_encoding: torch.Tensor, example_encodings: torch.Tensor) -> torch.Tensor:
+    def get_last_latent_state(self, current_sample_encoding: torch.Tensor, example_encodings: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError()
+
+    def get_query_vector(self, current_sample_encoding: torch.Tensor, example_encodings: torch.Tensor) -> torch.Tensor:
+        return torch.matmul(self.get_last_latent_state(current_sample_encoding, example_encodings), self.bilinear)
+
+    def get_last_vfe(self, current_sample_encoding: torch.Tensor, example_encodings: torch.Tensor) -> torch.Tensor:
+        h_t = self.get_last_latent_state(current_sample_encoding, example_encodings)
+        return self.value_fn_estimator(h_t).squeeze()
 
     def forward(self, current_sample_encodings: torch.Tensor, example_encodings: torch.Tensor,
                 policy_example_indices: torch.Tensor, all_example_encodings: torch.Tensor,
@@ -48,8 +55,7 @@ class RetICLBase(nn.Module):
         if is_pg(self.options):
             # Compute activations over full corpus
             batch_size, max_num_examples = example_encodings.shape[:2]
-            # TODO: remove bias here
-            activations = torch.matmul(query_vectors, all_example_encodings.T) + self.bias # (N * L x K)
+            activations = torch.matmul(query_vectors, all_example_encodings.T) # (N * L x K)
             # Mask out previously used examples
             for used_example_idx in range(0, max_num_examples - 1):
                 for next_example_idx in range(used_example_idx + 1, max_num_examples):
