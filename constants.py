@@ -6,6 +6,7 @@ class Datasets(Enum):
     MATH = "math"
     SVAMP = "svamp"
     FEEDBACK = "feedback"
+    QASC = "qasc"
 
 class ModelType(Enum):
     RNN = "rnn"

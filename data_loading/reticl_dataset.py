@@ -173,7 +173,7 @@ class RetICLDataset(TorchDataset):
             top_neighbor_indices = top_neighbor_indices[top_neighbor_indices != index]
         top_neighbor_indices = top_neighbor_indices[:self.options.num_examples]
         # Flip order to handle recency bias
-        top_neighbor_indices = np.flip(top_neighbor_indices)
+        top_neighbor_indices = np.flip(top_neighbor_indices).copy()
         return top_neighbor_indices, None
 
     def get_policy_sampled_examples(self, index: int, cur_sample: DataSample, corp_eq_data: bool):
@@ -182,7 +182,7 @@ class RetICLDataset(TorchDataset):
         if corp_eq_data:
             used_idxs.append(index)
         example_encodings = torch.empty((0, self.emb_size)).to(device)
-        random_example_idxs = self.get_random_examples(index, corp_eq_data)
+        random_example_idxs, _ = self.get_random_examples(index, corp_eq_data)
         while len(example_idxs) < self.options.num_examples:
             qv = self.retriever.get_query_vector(
                 current_sample_encoding=cur_sample["context_encoding"],

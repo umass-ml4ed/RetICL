@@ -13,6 +13,7 @@ from data_loading.gsm8k import gsm8k_get_data, gsm8k_process_sample, gsm8k_check
 from data_loading.math import math_get_data, math_process_sample, math_check_correct
 from data_loading.svamp import svamp_get_data, svamp_process_sample, svamp_check_correct
 from data_loading.feedback import eedi_get_data, eedi_process_sample, eedi_check_correct
+from data_loading.qasc import qasc_get_data, qasc_process_sample, qasc_check_correct
 from models.generator import GeneratorCM
 from constants import Datasets, RLAlgorithm, SamplingMethod, Reward, EncoderModelType, ModelType, Pooling, Init
 from utils import initialize_seeds, device, TrainOptions
@@ -29,6 +30,8 @@ def get_dataset_functions(options_dict: dict) -> Tuple[GetDataFunction, ProcessD
         return svamp_get_data, svamp_process_sample, svamp_check_correct
     if options.dataset == Datasets.FEEDBACK.value:
         return eedi_get_data, eedi_process_sample, eedi_check_correct
+    if options.dataset == Datasets.QASC.value:
+        return qasc_get_data, qasc_process_sample, qasc_check_correct
     raise Exception(f"Dataset {options.dataset} not supported!")
 
 def bool_type(arg: str):
