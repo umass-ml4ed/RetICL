@@ -36,8 +36,8 @@ def qasc_get_data(split: str, options: TrainOptions):
 
 def qasc_process_sample(sample: dict) -> DataSample:
     question = sample["formatted_question"]
-    # solution = " ".join([sample["fact1"], sample["fact2"], sample["combinedfact"]])
-    solution = sample["combinedfact"]
+    solution = " ".join([sample["fact1"], sample["fact2"], sample["combinedfact"]])
+    # solution = sample["combinedfact"]
     answer_idx = ord(sample["answerKey"]) - ord("A")
     answer = sample["question"]["choices"][answer_idx]["text"]
     return {
@@ -55,7 +55,7 @@ def extract_answer(solution: str):
     return match[-1]
 
 def clean_answer(answer: str):
-    return answer.replace(" ", "").strip(".").lower()
+    return answer.strip().replace(" ", "").strip(".").lower()
 
 def qasc_check_correct(src_meta_data: dict, pred_text: str):
     return clean_answer(src_meta_data["answer"]) == clean_answer(extract_answer(pred_text))

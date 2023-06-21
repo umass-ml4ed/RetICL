@@ -19,6 +19,7 @@ def exhaustive_eval(dataset: RetICLDataset, check_correct: CheckCorrectFunction,
     labels: List[str] = []
     meta_datas: List[dict] = []
     preds: List[str] = []
+    example_set = set()
     for sample in tqdm(dataset.data):
         labels.append(sample["lm_label"])
         meta_datas.append(sample["meta_data"])
@@ -47,12 +48,13 @@ def exhaustive_eval(dataset: RetICLDataset, check_correct: CheckCorrectFunction,
                 first_correct = np.argmax(correct)
                 prompts.append(prompt_cands[first_correct])
                 preds.append(pred_cands[first_correct])
+                example_set.add(prompt_idx + first_correct)
                 break
         if not correct_found:
             prompts.append(sample["lm_context"])
             preds.append("")
 
-    return prompts, labels, meta_datas, preds
+    return prompts, labels, meta_datas, preds, example_set
 
 def policy_eval(dataset: RetICLDataset, options: TrainOptions):
     prompts: List[str] = []
@@ -91,8 +93,7 @@ def evaluate_reticl(run, get_data: GetDataFunction, process_sample: ProcessDataF
 
         # Collect predictions and labels over the dataset
         if options.sm == SamplingMethod.EXHAUSTIVE.value:
-            prompts, labels, meta_datas, preds = exhaustive_eval(dataset, check_correct, options)
-            example_set = set()
+            prompts, labels, meta_datas, preds, example_set = exhaustive_eval(dataset, check_correct, options)
         else:
             prompts, labels, meta_datas, preds, example_set = policy_eval(dataset, options)
 
