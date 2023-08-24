@@ -8,7 +8,7 @@ import numpy as np
 
 from models.retriever import Retriever, retriever_model
 from models.generator import Generator
-from data_loading.data_types import GetDataFunction, ProcessDataFunction, CheckCorrectFunction
+from data_loading.data_types import GetDataFunction, ProcessDataFunction, CheckCorrectFunction, ComplexityMetric
 from data_loading.reticl_dataset import RetICLDataset, Collator
 from constants import Datasets, SamplingMethod
 from utils import TrainOptions, device
@@ -82,13 +82,13 @@ def policy_eval(dataset: RetICLDataset, options: TrainOptions):
     return prompts, labels, meta_datas, preds, example_set
 
 def evaluate_reticl(run, get_data: GetDataFunction, process_sample: ProcessDataFunction, check_correct: CheckCorrectFunction,
-             retriever: Optional[Retriever], split: str, options: TrainOptions):
+            complexity_metric: Optional[ComplexityMetric], retriever: Optional[Retriever], split: str, options: TrainOptions):
     with torch.no_grad():
         if not run and options.wandb:
             run = wandb.init(project="reticl", config=options.as_dict())
         if retriever:
             retriever.eval()
-        dataset = RetICLDataset(get_data, process_sample, split, retriever, options)
+        dataset = RetICLDataset(get_data, process_sample, split, retriever, options, complexity_metric=complexity_metric)
         dataset.set_greedy(True) # Use greedy sampling for policy-based example retrieval
 
         # Collect predictions and labels over the dataset
@@ -131,14 +131,14 @@ def evaluate_reticl(run, get_data: GetDataFunction, process_sample: ProcessDataF
         df.to_csv(out_filename)
 
 def evaluate(get_data: GetDataFunction, process_sample: ProcessDataFunction, check_correct: CheckCorrectFunction,
-             split: str, options_dict: dict):
+             complexity_metric: Optional[ComplexityMetric], split: str, options_dict: dict):
     options = TrainOptions(options_dict)
     if options.model_name:
         retriever = retriever_model(options)
         retriever.load_state_dict(torch.load(f"{options.model_name}.pt", map_location=device))
     else:
         retriever = None
-    evaluate_reticl(None, get_data, process_sample, check_correct, retriever, split, options)
+    evaluate_reticl(None, get_data, process_sample, check_correct, complexity_metric, retriever, split, options)
 
 def answer_missing(df: pandas.DataFrame, dataset: str):
     # indicator = "The answer is " if dataset == Datasets.TABMWP.value else "Final Answer: "

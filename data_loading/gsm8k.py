@@ -76,3 +76,6 @@ def gsm8k_check_correct(src_meta_data: dict, pred_text: str):
     src_pattern = re.compile(r"#### (.*)$")
     pred_pattern = re.compile(r"Final Answer: ([\d\.]+)")
     return extract_answer(src_meta_data["answer"], src_pattern) == extract_answer(pred_text, pred_pattern)
+
+def gsm8k_complexity_metric(sample: DataSample):
+    return sample["lm_label"].count("\n")

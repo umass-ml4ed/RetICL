@@ -59,3 +59,6 @@ def clean_answer(answer: str):
 
 def qasc_check_correct(src_meta_data: dict, pred_text: str):
     return clean_answer(src_meta_data["answer"]) == clean_answer(extract_answer(pred_text))
+
+def qasc_complexity_metric(sample: DataSample):
+    return sample["lm_label"].count(" ")

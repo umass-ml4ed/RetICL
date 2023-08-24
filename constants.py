@@ -32,6 +32,7 @@ class SamplingMethod(Enum):
     EPSILON_GREEDY = "eg"
     SOFTMAX = "softmax"
     EXHAUSTIVE = "exhaustive"
+    COMPLEX = "complex"
 
 class Reward(Enum):
     PPL = "ppl"

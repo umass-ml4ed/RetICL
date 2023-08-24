@@ -81,3 +81,6 @@ def tabmwp_check_correct(src_meta_data: dict, pred_text: str):
     pred_norm = normalize_answer(pred, src_meta_data["unit"])
     label_norm = normalize_answer(src_meta_data["answer"], src_meta_data["unit"])
     return pred_norm.lower() == label_norm.lower()
+
+def tabmwp_complexity_metric(sample: DataSample):
+    return sample["lm_label"].count("\\n")

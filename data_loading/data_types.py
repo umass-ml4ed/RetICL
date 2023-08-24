@@ -15,3 +15,4 @@ class DataSample(TypedDict):
 GetDataFunction = Callable[[str, TrainOptions], Tuple[List[dict], Optional[List[dict]]]]
 ProcessDataFunction = Callable[[dict], DataSample]
 CheckCorrectFunction = Callable[[dict, str], Union[bool, float]]
+ComplexityMetric = Callable[[DataSample], int]

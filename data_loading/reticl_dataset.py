@@ -9,7 +9,7 @@ from transformers import GPT2Model, BertModel, AutoTokenizer
 from sentence_transformers import SentenceTransformer
 import faiss
 
-from data_loading.data_types import DataSample, GetDataFunction, ProcessDataFunction
+from data_loading.data_types import DataSample, GetDataFunction, ProcessDataFunction, ComplexityMetric
 from models.retriever import Retriever
 from models.encoder import SBERTEncoder
 from constants import SamplingMethod, EncoderModelType
@@ -43,7 +43,7 @@ class CollatedBatch(TypedDict):
 class RetICLDataset(TorchDataset):
     def __init__(self, get_data: GetDataFunction, process_sample: ProcessDataFunction,
                  split: str, retriever: Optional[Retriever], options: TrainOptions, compute_intial_encodings: bool = True,
-                 cached_encoding_matrix: Optional[torch.Tensor] = None):
+                 cached_encoding_matrix: Optional[torch.Tensor] = None, complexity_metric: Optional[ComplexityMetric] = None):
         super().__init__()
 
         self.options = options
@@ -61,7 +61,7 @@ class RetICLDataset(TorchDataset):
 
         # Compute encodings
         self.trainable_encoder = False
-        if options.sm != SamplingMethod.RANDOM.value:
+        if options.sm not in (SamplingMethod.RANDOM.value, SamplingMethod.COMPLEX.value):
             if retriever is not None and retriever.encoder is not None:
                 # We have a trainable encoder, so encodings are computed on the fly
                 self.trainable_encoder = True
@@ -80,6 +80,11 @@ class RetICLDataset(TorchDataset):
                 else:
                     self.encoder = SentenceTransformer(self.options.encoder_model or "all-distilroberta-v1")
                 self.compute_encodings(cached_encoding_matrix=cached_encoding_matrix)
+        if options.sm == SamplingMethod.COMPLEX.value:
+            if complexity_metric is None:
+                complexity_metric = lambda sample: sample["lm_label"].count("\n")
+            corpus_complexity = [-complexity_metric(sample) for sample in self.corpus]
+            self.complex_example_idxs = np.flip(np.argsort(corpus_complexity)[:options.num_examples]).copy()
 
     def batch_encode(self, samples: List[DataSample], inc_label: bool, show_progress: bool = True):
         batch_size = 10
@@ -273,6 +278,8 @@ class RetICLDataset(TorchDataset):
                 example_idxs, example_encodings = self.get_random_examples(index, corp_eq_data)
             elif self.options.sm == SamplingMethod.SIMILARITY.value:
                 example_idxs, example_encodings = self.get_knn_examples(index, cur_sample, corp_eq_data)
+            elif self.options.sm == SamplingMethod.COMPLEX.value:
+                example_idxs, example_encodings = self.complex_example_idxs, None
             else:
                 if self.greedy:
                     example_idxs, example_encodings = self.get_beam_search_examples(index, cur_sample, corp_eq_data)
