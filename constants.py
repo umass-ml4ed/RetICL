@@ -25,6 +25,7 @@ class RLAlgorithm(Enum):
     RWB = "rwb"
     AC = "ac"
     PPO = "ppo"
+    DSAC = "dsac"
 
 class SamplingMethod(Enum):
     RANDOM = "random"
@@ -52,4 +53,10 @@ MODEL_TO_EMB_SIZE = {
     "all-mpnet-base-v2": 768,
     "all-MiniLM-L12-v2": 384,
     "all-distilroberta-v1": 768,
+}
+
+DEFAULT_MAX_GEN_TOKENS = {
+    Datasets.TABMWP.value: 450,
+    Datasets.GSM8K.value: 400,
+    Datasets.QASC.value: 150,
 }

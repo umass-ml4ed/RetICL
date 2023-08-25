@@ -8,11 +8,11 @@ from utils import TrainOptions, device
 
 Retriever = Union[RetICLRNN, RetICLAttn, RetICLInd]
 
-def retriever_model(options: TrainOptions):
+def retriever_model(options: TrainOptions, use_bias: bool = False) -> Retriever:
     if options.model_type in (ModelType.RNN.value, ModelType.LSTM.value):
-        return RetICLRNN(options).to(device)
+        return RetICLRNN(options, use_bias).to(device)
     if options.model_type == ModelType.ATTN.value:
-        return RetICLAttn(options).to(device)
+        return RetICLAttn(options, use_bias).to(device)
     if options.model_type == ModelType.IND.value:
-        return RetICLInd(options).to(device)
+        return RetICLInd(options, use_bias).to(device)
     raise Exception(f"Model type {options.model_type} not supported!")

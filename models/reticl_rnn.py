@@ -6,8 +6,8 @@ from utils import TrainOptions, device, orthogonal_init_
 from constants import Init, ModelType
 
 class RetICLRNN(RetICLBase):
-    def __init__(self, options: TrainOptions):
-        super().__init__(options)
+    def __init__(self, options: TrainOptions, use_bias: bool):
+        super().__init__(options, use_bias)
         self.lstm = options.model_type == ModelType.LSTM.value
         if self.lstm:
             self.rnn = nn.LSTM(self.emb_size, options.hidden_size, batch_first=True)

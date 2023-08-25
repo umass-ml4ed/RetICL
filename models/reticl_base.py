@@ -7,9 +7,10 @@ from utils import TrainOptions, is_pg, orthogonal_init_
 from constants import MODEL_TO_EMB_SIZE, Init, Pooling
 
 class RetICLBase(nn.Module):
-    def __init__(self, options: TrainOptions):
+    def __init__(self, options: TrainOptions, use_bias: bool):
         super().__init__()
         self.options = options
+        self.use_bias = use_bias
         self.emb_size = options.encoder_h or MODEL_TO_EMB_SIZE.get(options.encoder_model, 768)
         self.dropout = nn.Dropout(options.dropout)
         self.bilinear = nn.Parameter(torch.empty((options.hidden_size, self.emb_size)))
@@ -56,6 +57,9 @@ class RetICLBase(nn.Module):
             # Compute activations over full corpus
             batch_size, max_num_examples = example_encodings.shape[:2]
             activations = torch.matmul(query_vectors, all_example_encodings.T) # (N * L x K)
+            # TODO: test this
+            if self.use_bias:
+                activations += self.bias
             # Mask out previously used examples
             for used_example_idx in range(0, max_num_examples - 1):
                 for next_example_idx in range(used_example_idx + 1, max_num_examples):

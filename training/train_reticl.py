@@ -1,3 +1,4 @@
+from typing import List
 import os
 import torch
 from torch.utils.data import DataLoader
@@ -6,10 +7,11 @@ from tqdm import tqdm
 import wandb
 import nltk
 
-from models.retriever import retriever_model
+from models.retriever import retriever_model, Retriever
 from models.generator import Generator
 from data_loading.data_types import GetDataFunction, ProcessDataFunction, CheckCorrectFunction
 from data_loading.reticl_dataset import RetICLDataset, Collator, CollatedBatch
+from training.replay_buffer import ReplayBuffer
 from evaluate import evaluate_reticl
 from constants import SamplingMethod, RLAlgorithm, Reward
 from utils import TrainOptions, device, is_pg
@@ -74,6 +76,20 @@ def get_entropy(activations: torch.Tensor):
     # Normalize by maximum entropy so coefficient is independent of action space size
     return entropy / torch.log(torch.tensor(action_distro.shape[-1]))
 
+def get_optim(models: List[Retriever], options: TrainOptions, checkpoint = None):
+    all_named_params = []
+    for model in models:
+        all_named_params += list(model.named_parameters())
+    retriever_params = [param for name, param in all_named_params if "encoder" not in name]
+    encoder_params = [param for name, param in all_named_params if "encoder" in name]
+    optimizer = torch.optim.AdamW([
+        {"params": retriever_params},
+        {"params": encoder_params, "lr": options.encoder_lr}
+    ], lr=options.lr, weight_decay=options.wd)
+    if checkpoint is not None:
+        optimizer.load_state_dict(checkpoint)
+    return optimizer, retriever_params + encoder_params
+
 def train_reticl(get_data: GetDataFunction, process_sample: ProcessDataFunction, check_correct: CheckCorrectFunction,
                  train_split: str, dev_split: str, options_dict: dict):
     options = TrainOptions(options_dict)
@@ -90,7 +106,7 @@ def train_reticl(get_data: GetDataFunction, process_sample: ProcessDataFunction,
     else:
         checkpoint = None
 
-    # Create/load model
+    # Create/load model(s) and optimizer(s)
     retriever = retriever_model(options)
     if checkpoint:
         retriever.load_state_dict(checkpoint["retriever"])
@@ -102,6 +118,20 @@ def train_reticl(get_data: GetDataFunction, process_sample: ProcessDataFunction,
         val_est_model.train()
     else:
         val_est_model = None
+    optimizer, retriever_params = get_optim(
+        [retriever, val_est_model] if options.sep_val_model else [retriever],
+        options, checkpoint["optimizer"] if checkpoint else None
+    )
+
+    # Initialize critics/targets/optimizers for DSAC
+    if options.rl_algo == RLAlgorithm.DSAC.value:
+        # TODO: also setup optimizer/param for entropy coefficient
+        # TODO: option to share params between critics and actor
+        critics = [retriever_model(options, True) for _ in range(2)]
+        critic_targets = [retriever_model(options, True) for _ in range(2)]
+        critic_optims = [get_optim([critic], options)[0] for critic in critics]
+        for critic, target in zip(critics, critic_targets):
+            target.load_state_dict(critic.state_dict())
 
     # Create train/val datasets/loaders
     dataset = RetICLDataset(get_data, process_sample, train_split, retriever, options)
@@ -109,7 +139,8 @@ def train_reticl(get_data: GetDataFunction, process_sample: ProcessDataFunction,
     val_set.set_greedy(True) # Use greedy retrieval for validation
     data_loader = DataLoader(
         dataset,
-        collate_fn=Collator(),
+        # Collating done manually so it's easier to collect samples for adding to replay buffer
+        # collate_fn=Collator(),
         batch_size=options.batch_size,
         shuffle=True,
         drop_last=False
@@ -122,20 +153,12 @@ def train_reticl(get_data: GetDataFunction, process_sample: ProcessDataFunction,
         drop_last=False
     )
 
-    # Setup optimizer
-    all_named_params = list(retriever.named_parameters()) + list(val_est_model.named_parameters()) if options.sep_val_model else list(retriever.named_parameters())
-    retriever_params = [param for name, param in all_named_params if "encoder" not in name]
-    encoder_params = [param for name, param in all_named_params if "encoder" in name]
-    optimizer = torch.optim.AdamW([
-        {"params": retriever_params},
-        {"params": encoder_params, "lr": options.encoder_lr}
-    ], lr=options.lr, weight_decay=options.wd)
-    if checkpoint:
-        optimizer.load_state_dict(checkpoint["optimizer"])
-
     print("Training...")
     # torch.autograd.set_detect_anomaly(True)
-    previous_model = None # For PPO
+    if options.rl_algo == RLAlgorithm.PPO.value:
+        previous_model = None
+    if options.rl_algo == RLAlgorithm.DSAC.value:
+        replay_buffer = ReplayBuffer(options)
     best_model = retriever_model(options)
     best_val_accuracy = None
     e_coef = 0.0
@@ -158,7 +181,9 @@ def train_reticl(get_data: GetDataFunction, process_sample: ProcessDataFunction,
             print("Entropy Coefficient:", e_coef)
 
         # Sample batch from dataset - example retrieval is also done here (__getitem__ in RetICLDataset)
-        for batch in tqdm(data_loader):
+        for raw_batch in tqdm(data_loader):
+            import pdb; pdb.set_trace()
+            batch = Collator()(raw_batch) # TODO: test, and if this works then save single collator above
             batch_size, max_num_examples = batch["example_encodings"].shape[:2]
 
             # Calculate rewards for batch - only applied to final example in sequence
@@ -172,12 +197,22 @@ def train_reticl(get_data: GetDataFunction, process_sample: ProcessDataFunction,
             # Calculate returns with reverse cumulative sum, assume gamma=1
             returns = torch.cumsum(rewards.flip(1), dim=1).flip(1).view(-1) # (N * L)
 
-            # Get activations on current examples and value function estimates from retriever
-            if options.sep_val_model:
-                activations, _ = retriever(**batch)
-                _, value_estimates = val_est_model(**batch)
-            else:
-                activations, value_estimates = retriever(**batch)
+            # Off-policy: add to buffer
+            if options.rl_algo == RLAlgorithm.DSAC.value:
+                # Add episodes to buffer
+                replay_buffer.add(raw_batch, rewards)
+
+                # Don't continue to training if buffer isn't full enough yet
+                if len(replay_buffer) < options.episodes_before_train:
+                    continue
+
+            # On-policy: get activations on current examples and value function estimates from retriever
+            if options.rl_algo != RLAlgorithm.DSAC.value:
+                if options.sep_val_model:
+                    activations, _ = retriever(**batch)
+                    _, value_estimates = val_est_model(**batch)
+                else:
+                    activations, value_estimates = retriever(**batch)
 
             # Calculate loss and backprop
             loss_mask = torch.arange(max_num_examples).expand(batch_size, -1) >= batch["num_examples"].unsqueeze(1)
@@ -242,13 +277,63 @@ def train_reticl(get_data: GetDataFunction, process_sample: ProcessDataFunction,
                     vf_loss.mean().backward()
                 else:
                     loss = clip_loss + options.v_coef * vf_loss - e_coef * entropy
+            elif options.rl_algo == RLAlgorithm.DSAC.value:
+                # Implementation roughly based on https://github.com/p-christ/Deep-Reinforcement-Learning-Algorithms-with-PyTorch
+                for _ in range(options.updates_per_batch):
+                    raw_batch, rewards = replay_buffer.sample(options.train_batch_size)
+                    batch = Collator()(raw_batch) # TODO: use existing collator instance
+                    alpha = options.e_coef # TODO: if training alpha then get from param
+
+                    # Get policy at each state
+                    activations, _ = retriever(**batch)
+                    pi = torch.softmax(activations, dim=-1)
+                    log_pi = torch.log(pi)
+
+                    # Get q function targets
+                    with torch.no_grad():
+                        # Get q function estimates for next states
+                        # Take min of target outputs to avoid q value explosion
+                        next_q_ests = torch.min(critic_targets[0](**batch)[0], critic_targets[1](**batch)[0])
+                        soft_val_est = (pi * (next_q_ests - alpha * log_pi)).sum(dim=-1)
+                        # Target is just reward for terminal states; and slice to start at v_1
+                        soft_val_est = F.pad(soft_val_est, (0, 1))[:, 1:]
+                        q_targets = rewards + soft_val_est
+
+                    # Update critics
+                    for critic, target, optim in zip(critics, critic_targets, critic_optims):
+                        # Get the estimated q value for each selected action
+                        q_est_vecs, _ = critic(**batch)
+                        q_ests = torch.gather(q_est_vecs, 2, batch["policy_example_indices"].unsqueeze(2)).squeeze(2)
+                        # Minimize soft Bellman residual and update network
+                        loss = F.mse_loss(q_ests, q_targets)
+                        optim.zero_grad()
+                        loss.backward()
+                        torch.nn.utils.clip_grad_norm_(critic.parameters(), options.grad_clip)
+                        optim.step()
+                        # Anneal target towards critic using Polyak update
+                        for critic_param, target_param in zip(critic.parameters(), target.parameters()):
+                            target_param.data.copy_(options.tau * critic_param.data + (1 - options.tau) * target_param.data)
+
+                    # Update actor
+                    with torch.no_grad():
+                        q_ests = torch.min(critics[0](**batch)[0], critics[1](**batch)[0])
+                    actor_loss = (pi * (alpha * log_pi - q_ests)).sum(dim=-1).mean()
+                    optimizer.zero_grad()
+                    actor_loss.backward()
+                    torch.nn.utils.clip_grad_norm_(retriever_params, options.grad_clip)
+                    optimizer.step()
+
+                    # TODO: optionally compute ent coef loss and update, not sure where this should happen
             else:
                 raise Exception(f"Algorithm {options.rl_algo} not supported!")
-            loss[loss_mask] = 0
-            loss.mean().backward()
-            torch.nn.utils.clip_grad_norm_(retriever_params + encoder_params, options.grad_clip)
-            optimizer.step()
-            optimizer.zero_grad()
+
+            # Do gradient step (DSAC has its own)
+            if options.rl_algo != RLAlgorithm.DSAC.value:
+                loss[loss_mask] = 0
+                loss.mean().backward()
+                torch.nn.utils.clip_grad_norm_(retriever_params, options.grad_clip)
+                optimizer.step()
+                optimizer.zero_grad()
 
             # If training encoder, re-compute corpus encodings (after each training step)
             if retriever.encoder is not None:
@@ -323,4 +408,4 @@ def train_reticl(get_data: GetDataFunction, process_sample: ProcessDataFunction,
     final_model = best_model if options.save_best else retriever
     if not options.save_best:
         torch.save(final_model.state_dict(), f"{options.model_name}.pt")
-    evaluate_reticl(run, get_data, process_sample, check_correct, final_model, dev_split, options)
+    evaluate_reticl(run, get_data, process_sample, check_correct, None, final_model, dev_split, options)

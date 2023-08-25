@@ -48,7 +48,7 @@ def visualize_representations(get_data: GetDataFunction, process_sample: Process
     if not options.model_name:
         retriever = None
     else:
-        retriever = RetICLRNN(options).to(device)
+        retriever = RetICLRNN(options, False).to(device)
         retriever.load_state_dict(torch.load(f"{options.model_name}.pt", map_location=device))
         retriever.eval()
 

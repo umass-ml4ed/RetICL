@@ -1,4 +1,4 @@
-from typing import List
+from typing import Any, List, Mapping
 from transformers import AutoTokenizer, AutoModel
 import torch
 from torch import nn
@@ -37,7 +37,6 @@ class SBERTEncoder(nn.Module):
         model_name = "sentence-transformers/" + (options.encoder_model or "all-distilroberta-v1")
         self.max_len = max_sbert_len(model_name)
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        # TODO: if not ft_encoder, don't save with model params
         self.model = AutoModel.from_pretrained(model_name)
         if not options.ft_encoder:
             for param in self.model.parameters():
@@ -45,6 +44,18 @@ class SBERTEncoder(nn.Module):
         self.eos_embedding = self.model.get_input_embeddings()(torch.tensor([self.tokenizer.eos_token_id])).squeeze().to(device)
         self.input_params = EncoderParams(options)
         self.example_params = EncoderParams(options)
+
+    # TODO: test this
+    def state_dict(self, destination=None, prefix='', keep_vars=False):
+        state_dict = super().state_dict(destination=destination, prefix=prefix, keep_vars=keep_vars)
+        if not self.options.ft_encoder:
+            del state_dict["model"]
+        return state_dict
+
+    def load_state_dict(self, state_dict: Mapping[str, Any], strict: bool = True):
+        if not self.options.ft_encoder:
+            state_dict["model"] = self.model
+        return super().load_state_dict(state_dict, strict)
 
     def encode(self, seq_strings: List[str], is_example: bool):
         params = self.example_params if is_example else self.input_params
