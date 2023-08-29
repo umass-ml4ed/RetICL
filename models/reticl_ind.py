@@ -6,8 +6,8 @@ from utils import TrainOptions, orthogonal_init_
 from constants import Init
 
 class RetICLInd(RetICLBase):
-    def __init__(self, options: TrainOptions, use_bias: bool):
-        super().__init__(options, use_bias)
+    def __init__(self, options: TrainOptions, use_bias: bool, mask_prev_examples: bool, num_critics: int):
+        super().__init__(options, use_bias, mask_prev_examples, num_critics)
         self.h_0_transform = nn.Sequential(
             nn.Linear(self.emb_size, options.hidden_size),
             nn.Tanh()

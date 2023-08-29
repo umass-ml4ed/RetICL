@@ -7,18 +7,32 @@ from utils import TrainOptions, is_pg, orthogonal_init_
 from constants import MODEL_TO_EMB_SIZE, Init, Pooling
 
 class RetICLBase(nn.Module):
-    def __init__(self, options: TrainOptions, use_bias: bool):
+    def __init__(self, options: TrainOptions, use_bias: bool, mask_prev_examples: bool, num_critics: int):
         super().__init__()
         self.options = options
         self.use_bias = use_bias
+        self.mask_prev_examples = mask_prev_examples
         self.emb_size = options.encoder_h or MODEL_TO_EMB_SIZE.get(options.encoder_model, 768)
         self.dropout = nn.Dropout(options.dropout)
         self.bilinear = nn.Parameter(torch.empty((options.hidden_size, self.emb_size)))
         self.bias = nn.Parameter(torch.zeros((1)))
-        self.value_fn_estimator = nn.Linear(options.hidden_size, 1)
+        self.num_critics = num_critics
+        if num_critics == 0:
+            self.value_fn_estimator = nn.Linear(options.hidden_size, 1)
+        else:
+            self.critics = nn.ParameterList([
+                nn.ParameterDict({
+                    "bilinear": nn.Parameter(torch.empty((options.hidden_size, self.emb_size))),
+                    "bias": nn.Parameter(torch.zeros((1)))
+                }) for _ in range(num_critics)
+            ])
         if options.init == Init.ORTHOGONAL.value:
             nn.init.orthogonal_(self.bilinear, gain=1.0)
-            orthogonal_init_(self.value_fn_estimator, gain=1.0)
+            if num_critics == 0:
+                orthogonal_init_(self.value_fn_estimator, gain=1.0)
+            else:
+                for critic in self.critics:
+                    nn.init.orthogonal_(critic["bilinear"], gain=1.0)
         else:
             # Follows pytorch Bilinear implementation
             init_bound = 1 / (options.hidden_size ** 0.5)
@@ -57,17 +71,17 @@ class RetICLBase(nn.Module):
             # Compute activations over full corpus
             batch_size, max_num_examples = example_encodings.shape[:2]
             activations = torch.matmul(query_vectors, all_example_encodings.T) # (N * L x K)
-            # TODO: test this
             if self.use_bias:
                 activations += self.bias
             # Mask out previously used examples
-            for used_example_idx in range(0, max_num_examples - 1):
-                for next_example_idx in range(used_example_idx + 1, max_num_examples):
-                    activations.view(batch_size, max_num_examples, -1)[
-                        torch.arange(batch_size),
-                        next_example_idx,
-                        policy_example_indices[:, used_example_idx]
-                    ] = -torch.inf
+            if self.mask_prev_examples:
+                for used_example_idx in range(0, max_num_examples - 1):
+                    for next_example_idx in range(used_example_idx + 1, max_num_examples):
+                        activations.view(batch_size, max_num_examples, -1)[
+                            torch.arange(batch_size),
+                            next_example_idx,
+                            policy_example_indices[:, used_example_idx]
+                        ] = -torch.inf
         else:
             # Single activation per example - complete bilinear transformation
             example_encodings = example_encodings.view(-1, self.emb_size).unsqueeze(2) # (N * L x E x 1)
@@ -75,6 +89,16 @@ class RetICLBase(nn.Module):
             activations = activations.squeeze() # (N * L)
 
         # Compute value estimates
-        value_estimates = self.value_fn_estimator(latent_states).view(-1) # (N * L)
+        if self.num_critics == 0:
+            value_estimates = self.value_fn_estimator(latent_states).view(-1) # (N * L)
+            return activations, value_estimates
 
-        return activations, value_estimates
+        critic_outputs = [
+            torch.matmul(
+                torch.matmul(latent_states, critic["bilinear"]).view(-1, self.emb_size),
+                all_example_encodings.T
+            ) + critic["bias"]
+            for critic in self.critics
+        ]
+
+        return activations, critic_outputs

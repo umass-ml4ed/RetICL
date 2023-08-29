@@ -48,10 +48,10 @@ class TrainOptions:
         self.grad_clip: float = options_dict.get("grad_clip", 2.0)
         self.ppo_eps: float = options_dict.get("ppo_eps", 0.1)
         self.tau: float = options_dict.get("tau", 0.01)
-        self.replay_buffer_size: int = options_dict.get("replay_buffer_size", 1e4)
-        self.updates_per_batch: int = options_dict.get("updates_per_batch", 10)
+        self.replay_buffer_size: int = options_dict.get("replay_buffer_size", 10_000)
+        self.updates_per_batch: int = options_dict.get("updates_per_batch", 20)
         self.train_batch_size: int = options_dict.get("train_batch_size", 20)
-        self.episodes_before_train: int = options_dict.get("episodes_before_train", 100)
+        self.episodes_before_train: int = options_dict.get("episodes_before_train", 1000)
         self.init: str = options_dict.get("init", Init.ORTHOGONAL.value)
         self.epochs: int = options_dict.get("epochs", 20)
         self.batch_size: int = options_dict.get("batch_size", 20)
@@ -76,7 +76,7 @@ class TrainOptions:
         self.__dict__.update(options_dict)
 
 def is_pg(options: TrainOptions):
-    return options.rl_algo in (RLAlgorithm.REINFORCE.value, RLAlgorithm.RWB.value, RLAlgorithm.AC.value, RLAlgorithm.PPO.value)
+    return options.rl_algo in (RLAlgorithm.REINFORCE.value, RLAlgorithm.RWB.value, RLAlgorithm.AC.value, RLAlgorithm.PPO.value, RLAlgorithm.DSAC.value)
 
 def max_sbert_len(model_name: str):
     if "all-mpnet-base-v2" in model_name:

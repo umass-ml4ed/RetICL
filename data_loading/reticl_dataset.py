@@ -225,8 +225,7 @@ class RetICLDataset(TorchDataset):
             "example_idxs": [],
             "used_idxs": [index] if corp_eq_data else [],
             "example_encodings": torch.empty((0, self.emb_size)).to(device),
-            "prob": 1.0,
-            "score": 0.0
+            "prob": 1.0
         }]
         while len(beams[0]["example_idxs"]) < self.options.num_examples:
             beam_cands = []
@@ -244,13 +243,11 @@ class RetICLDataset(TorchDataset):
                         beam["example_encodings"],
                         self.corpus[example_idx]["full_encoding"].unsqueeze(0).to(device)
                     ], dim=0)
-                    val_estimate = self.retriever.get_last_vfe(cur_sample["context_encoding"], new_example_encodings)
                     beam_cands.append({
                         "example_idxs": beam["example_idxs"] + [example_idx.item()],
                         "used_idxs": beam["used_idxs"] + [example_idx.item()],
                         "example_encodings": new_example_encodings,
-                        "prob": beam["prob"] * pi_cur[example_idx].item(),
-                        "score": val_estimate
+                        "prob": beam["prob"] * pi_cur[example_idx].item()
                     })
             beams = sorted(beam_cands, key=lambda beam: -beam["prob"])[:beam_width]
         top_beam = sorted(beam_cands, key=lambda beam: -beam["prob"])[0]

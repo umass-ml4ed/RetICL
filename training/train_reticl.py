@@ -90,6 +90,10 @@ def get_optim(models: List[Retriever], options: TrainOptions, checkpoint = None)
         optimizer.load_state_dict(checkpoint)
     return optimizer, retriever_params + encoder_params
 
+def polyak_update(source: torch.nn.Module, target: torch.nn.Module, tau: float):
+    for source_param, target_param in zip(source.parameters(), target.parameters()):
+        target_param.data.copy_(tau * source_param.data + (1 - tau) * target_param.data)
+
 def train_reticl(get_data: GetDataFunction, process_sample: ProcessDataFunction, check_correct: CheckCorrectFunction,
                  train_split: str, dev_split: str, options_dict: dict):
     options = TrainOptions(options_dict)
@@ -107,11 +111,16 @@ def train_reticl(get_data: GetDataFunction, process_sample: ProcessDataFunction,
         checkpoint = None
 
     # Create/load model(s) and optimizer(s)
-    retriever = retriever_model(options)
+    if options.rl_algo == RLAlgorithm.DSAC.value and not options.sep_val_model:
+        retriever = retriever_model(options, num_critics=2)
+        best_model = retriever_model(options, num_critics=2)
+    else:
+        retriever = retriever_model(options)
+        best_model = retriever_model(options)
     if checkpoint:
         retriever.load_state_dict(checkpoint["retriever"])
     retriever.train()
-    if options.sep_val_model:
+    if options.sep_val_model and options.rl_algo != RLAlgorithm.DSAC.value:
         val_est_model = retriever_model(options)
         if checkpoint:
             val_est_model.load_state_dict(checkpoint["val_est"])
@@ -119,19 +128,28 @@ def train_reticl(get_data: GetDataFunction, process_sample: ProcessDataFunction,
     else:
         val_est_model = None
     optimizer, retriever_params = get_optim(
-        [retriever, val_est_model] if options.sep_val_model else [retriever],
+        [retriever, val_est_model] if val_est_model is not None else [retriever],
         options, checkpoint["optimizer"] if checkpoint else None
     )
 
-    # Initialize critics/targets/optimizers for DSAC
+    # Initialize critics/targets/alpha/optimizers for DSAC
     if options.rl_algo == RLAlgorithm.DSAC.value:
-        # TODO: also setup optimizer/param for entropy coefficient
-        # TODO: option to share params between critics and actor
-        critics = [retriever_model(options, True) for _ in range(2)]
-        critic_targets = [retriever_model(options, True) for _ in range(2)]
-        critic_optims = [get_optim([critic], options)[0] for critic in critics]
-        for critic, target in zip(critics, critic_targets):
-            target.load_state_dict(critic.state_dict())
+        num_critics = 2
+        if options.sep_val_model:
+            critics = [retriever_model(options, True, False) for _ in range(num_critics)]
+            critic_targets = [retriever_model(options, True, False) for _ in range(num_critics)]
+            critic_optims = [get_optim([critic], options)[0] for critic in critics]
+            for critic, target in zip(critics, critic_targets):
+                target.load_state_dict(critic.state_dict())
+                target.eval()
+        else:
+            critic_optims = [get_optim([retriever], options)[0] for _ in range(num_critics)]
+            target = retriever_model(options, num_critics=2)
+            target.load_state_dict(retriever.state_dict())
+            target.eval()
+        log_alpha = torch.zeros(1, requires_grad=True, device=device)
+        alpha_optim = torch.optim.AdamW([log_alpha], lr=options.lr, weight_decay=options.wd)
+        target_entropy = options.e_coef * torch.log(torch.tensor(options.corpus_size))
 
     # Create train/val datasets/loaders
     dataset = RetICLDataset(get_data, process_sample, train_split, retriever, options)
@@ -139,12 +157,13 @@ def train_reticl(get_data: GetDataFunction, process_sample: ProcessDataFunction,
     val_set.set_greedy(True) # Use greedy retrieval for validation
     data_loader = DataLoader(
         dataset,
-        # Collating done manually so it's easier to collect samples for adding to replay buffer
-        # collate_fn=Collator(),
+        # Actual collate done outside loader so it's easier to collect samples for adding to replay buffer
+        collate_fn=lambda batch: batch,
         batch_size=options.batch_size,
         shuffle=True,
         drop_last=False
     )
+    collator = Collator()
     val_loader = DataLoader(
         val_set,
         collate_fn=Collator(),
@@ -159,7 +178,6 @@ def train_reticl(get_data: GetDataFunction, process_sample: ProcessDataFunction,
         previous_model = None
     if options.rl_algo == RLAlgorithm.DSAC.value:
         replay_buffer = ReplayBuffer(options)
-    best_model = retriever_model(options)
     best_val_accuracy = None
     e_coef = 0.0
     if checkpoint:
@@ -182,13 +200,13 @@ def train_reticl(get_data: GetDataFunction, process_sample: ProcessDataFunction,
 
         # Sample batch from dataset - example retrieval is also done here (__getitem__ in RetICLDataset)
         for raw_batch in tqdm(data_loader):
-            import pdb; pdb.set_trace()
-            batch = Collator()(raw_batch) # TODO: test, and if this works then save single collator above
+            batch = collator(raw_batch)
             batch_size, max_num_examples = batch["example_encodings"].shape[:2]
 
             # Calculate rewards for batch - only applied to final example in sequence
             rewards = get_rewards(batch, check_correct, options).to(device) # (N)
             rewards = F.pad(rewards.unsqueeze(1), (max_num_examples - 1, 0)) # (N x L)
+            total_reward += rewards.detach().cpu().numpy().sum()
 
             # Keep track of used examples
             for example_idx in batch["policy_example_indices"].view(-1):
@@ -280,50 +298,81 @@ def train_reticl(get_data: GetDataFunction, process_sample: ProcessDataFunction,
             elif options.rl_algo == RLAlgorithm.DSAC.value:
                 # Implementation roughly based on https://github.com/p-christ/Deep-Reinforcement-Learning-Algorithms-with-PyTorch
                 for _ in range(options.updates_per_batch):
-                    raw_batch, rewards = replay_buffer.sample(options.train_batch_size)
-                    batch = Collator()(raw_batch) # TODO: use existing collator instance
-                    alpha = options.e_coef # TODO: if training alpha then get from param
+                    batch_size = options.train_batch_size
+                    raw_batch, rewards = replay_buffer.sample(batch_size)
+                    batch = collator(raw_batch)
 
                     # Get policy at each state
-                    activations, _ = retriever(**batch)
-                    pi = torch.softmax(activations, dim=-1)
-                    log_pi = torch.log(pi)
+                    with torch.no_grad():
+                        activations, _ = retriever(**batch)
+                        pi = torch.clip(torch.softmax(activations, dim=-1), min=1e-8)
+                        log_pi = torch.log(pi)
+
+                    # Update entropy coefficient
+                    alpha = torch.exp(log_alpha.detach())
+                    alpha_loss = (pi * (-log_alpha * (log_pi + target_entropy))).sum(-1).mean()
+                    alpha_optim.zero_grad()
+                    alpha_loss.backward()
+                    alpha_optim.step()
 
                     # Get q function targets
                     with torch.no_grad():
-                        # Get q function estimates for next states
-                        # Take min of target outputs to avoid q value explosion
-                        next_q_ests = torch.min(critic_targets[0](**batch)[0], critic_targets[1](**batch)[0])
-                        soft_val_est = (pi * (next_q_ests - alpha * log_pi)).sum(dim=-1)
+                        # Get q function estimates for next states, take min to avoid q value explosion
+                        if options.sep_val_model:
+                            next_q_ests = torch.stack([target(**batch)[0] for target in critic_targets])
+                        else:
+                            next_q_ests = torch.stack(target(**batch)[1])
+                        next_q_ests = torch.min(next_q_ests, dim=0).values
+                        soft_val_est = (pi * (next_q_ests - alpha * log_pi)).sum(dim=-1).view(batch_size, -1)
                         # Target is just reward for terminal states; and slice to start at v_1
                         soft_val_est = F.pad(soft_val_est, (0, 1))[:, 1:]
                         q_targets = rewards + soft_val_est
 
                     # Update critics
-                    for critic, target, optim in zip(critics, critic_targets, critic_optims):
+                    for critic_idx in range(2):
+                        if options.sep_val_model:
+                            q_est_vecs = critics[critic_idx](**batch)[0]
+                        else:
+                            q_est_vecs = retriever(**batch)[1][critic_idx]
                         # Get the estimated q value for each selected action
-                        q_est_vecs, _ = critic(**batch)
-                        q_ests = torch.gather(q_est_vecs, 2, batch["policy_example_indices"].unsqueeze(2)).squeeze(2)
+                        q_ests = torch.gather(
+                            q_est_vecs.view(batch_size, max_num_examples, -1),
+                            dim=2, index=batch["policy_example_indices"].unsqueeze(2)
+                        ).squeeze(2)
                         # Minimize soft Bellman residual and update network
                         loss = F.mse_loss(q_ests, q_targets)
-                        optim.zero_grad()
+                        critic_optims[critic_idx].zero_grad()
                         loss.backward()
-                        torch.nn.utils.clip_grad_norm_(critic.parameters(), options.grad_clip)
-                        optim.step()
-                        # Anneal target towards critic using Polyak update
-                        for critic_param, target_param in zip(critic.parameters(), target.parameters()):
-                            target_param.data.copy_(options.tau * critic_param.data + (1 - options.tau) * target_param.data)
+                        if options.sep_val_model:
+                            torch.nn.utils.clip_grad_norm_(critics[critic_idx].parameters(), options.grad_clip)
+                        else:
+                            torch.nn.utils.clip_grad_norm_(retriever.parameters(), options.grad_clip)
+                        critic_optims[critic_idx].step()
+                        total_vf_loss += loss.item() / options.updates_per_batch
+
+                    # Anneal targets towards critics using Polyak update
+                    if options.sep_val_model:
+                        for critic, target in zip(critics, critic_targets):
+                            polyak_update(critic, target, options.tau)
+                    else:
+                        polyak_update(retriever, target, options.tau)
 
                     # Update actor
                     with torch.no_grad():
-                        q_ests = torch.min(critics[0](**batch)[0], critics[1](**batch)[0])
-                    actor_loss = (pi * (alpha * log_pi - q_ests)).sum(dim=-1).mean()
+                        if options.sep_val_model:
+                            q_ests = torch.stack([critic(**batch)[0] for critic in critics])
+                        else:
+                            q_ests = torch.stack(retriever(**batch)[1])
+                        q_ests = torch.min(q_ests, dim=0).values
+                    activations, _ = retriever(**batch)
+                    pi = torch.clip(torch.softmax(activations, dim=-1), min=1e-8)
+                    log_pi = torch.log(pi)
+                    actor_loss = (pi * (alpha * log_pi - q_ests.detach())).sum(dim=-1).mean()
                     optimizer.zero_grad()
                     actor_loss.backward()
                     torch.nn.utils.clip_grad_norm_(retriever_params, options.grad_clip)
                     optimizer.step()
-
-                    # TODO: optionally compute ent coef loss and update, not sure where this should happen
+                    total_loss += actor_loss.item() / options.updates_per_batch
             else:
                 raise Exception(f"Algorithm {options.rl_algo} not supported!")
 
@@ -334,15 +383,13 @@ def train_reticl(get_data: GetDataFunction, process_sample: ProcessDataFunction,
                 torch.nn.utils.clip_grad_norm_(retriever_params, options.grad_clip)
                 optimizer.step()
                 optimizer.zero_grad()
+                total_loss += loss.detach().cpu().numpy().sum()
+                if vf_loss is not None:
+                    total_vf_loss += vf_loss.detach().cpu().numpy().sum()
 
             # If training encoder, re-compute corpus encodings (after each training step)
             if retriever.encoder is not None:
                 dataset.compute_corpus_encodings(False)
-
-            total_reward += rewards.detach().cpu().numpy().sum()
-            total_loss += loss.detach().cpu().numpy().sum()
-            if vf_loss is not None:
-                total_vf_loss += vf_loss.detach().cpu().numpy().sum()
 
         with torch.no_grad():
             # Re-compute corpus encodings for validation set if training encoder
@@ -371,7 +418,7 @@ def train_reticl(get_data: GetDataFunction, process_sample: ProcessDataFunction,
         avg_reward = total_reward / len(dataset)
         avg_val_reward = val_reward / len(val_set)
         avg_val_accuracy = val_correct and val_correct / len(val_set)
-        avg_vf_loss = total_vf_loss / (len(dataset) * max_num_examples) if vf_loss is not None else None
+        avg_vf_loss = total_vf_loss / (len(dataset) * max_num_examples) if total_vf_loss != 0 else None
         if run:
             run.log({
                 "loss": avg_loss,
@@ -383,9 +430,10 @@ def train_reticl(get_data: GetDataFunction, process_sample: ProcessDataFunction,
                 "val_examples": len(val_example_set),
                 "val_entropy": val_entropy,
                 "epsilon": dataset.epsilon if options.sm == SamplingMethod.EPSILON_GREEDY.value else None,
+                "alpha": alpha if options.rl_algo == RLAlgorithm.DSAC.value else None,
             })
         print(f"Epoch {epoch + 1}, Loss: {avg_loss:.4f}, Reward: {avg_reward:.4f}, Val Reward: {avg_val_reward:.4f}, "
-              f"Train Examples: {len(train_example_set)}, Val Examples: {len(val_example_set)}")
+              f"Val Acc: {avg_val_accuracy:.4f}, Train Examples: {len(train_example_set)}, Val Examples: {len(val_example_set)}")
 
         # Save checkpoint
         # Commented since not properly resuming

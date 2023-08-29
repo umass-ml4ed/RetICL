@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 from sklearn.manifold import TSNE
 from tqdm import tqdm
 
-from models.reticl_rnn import RetICLRNN
+from models.retriever import retriever_model, Retriever
 from data_loading.data_types import GetDataFunction, ProcessDataFunction
 from data_loading.reticl_dataset import RetICLDataset, Collator
 from constants import Datasets
@@ -24,7 +24,7 @@ def get_problem_class(solution: str):
         ("div", len(re.findall(r"<<[\d\.]+/[\d\.]+=[\d\.]+>>", solution))),
     )
 
-def get_latent_states(retriever: RetICLRNN, dataset: RetICLDataset, options: TrainOptions):
+def get_latent_states(retriever: Retriever, dataset: RetICLDataset, options: TrainOptions):
     all_latent_states = []
     data_loader = DataLoader(
         dataset,
@@ -48,7 +48,7 @@ def visualize_representations(get_data: GetDataFunction, process_sample: Process
     if not options.model_name:
         retriever = None
     else:
-        retriever = RetICLRNN(options, False).to(device)
+        retriever = retriever_model(options).to(device)
         retriever.load_state_dict(torch.load(f"{options.model_name}.pt", map_location=device))
         retriever.eval()
 

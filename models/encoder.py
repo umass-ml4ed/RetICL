@@ -47,12 +47,14 @@ class SBERTEncoder(nn.Module):
 
     # TODO: test this
     def state_dict(self, destination=None, prefix='', keep_vars=False):
+        import pdb; pdb.set_trace()
         state_dict = super().state_dict(destination=destination, prefix=prefix, keep_vars=keep_vars)
         if not self.options.ft_encoder:
             del state_dict["model"]
         return state_dict
 
     def load_state_dict(self, state_dict: Mapping[str, Any], strict: bool = True):
+        import pdb; pdb.set_trace()
         if not self.options.ft_encoder:
             state_dict["model"] = self.model
         return super().load_state_dict(state_dict, strict)
