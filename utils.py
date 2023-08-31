@@ -49,7 +49,7 @@ class TrainOptions:
         self.ppo_eps: float = options_dict.get("ppo_eps", 0.1)
         self.tau: float = options_dict.get("tau", 0.01)
         self.replay_buffer_size: int = options_dict.get("replay_buffer_size", 10_000)
-        self.updates_per_batch: int = options_dict.get("updates_per_batch", 20)
+        self.updates_per_batch: int = options_dict.get("updates_per_batch", 10)
         self.train_batch_size: int = options_dict.get("train_batch_size", 20)
         self.episodes_before_train: int = options_dict.get("episodes_before_train", 1000)
         self.init: str = options_dict.get("init", Init.ORTHOGONAL.value)
