@@ -13,7 +13,7 @@ from data_loading.data_types import GetDataFunction, ProcessDataFunction, CheckC
 from data_loading.reticl_dataset import RetICLDataset, Collator, CollatedBatch
 from training.replay_buffer import ReplayBuffer
 from evaluate import evaluate_reticl
-from constants import SamplingMethod, RLAlgorithm, Reward
+from constants import SamplingMethod, RLAlgorithm, Reward, LRSchedule
 from utils import TrainOptions, device, is_pg
 
 def get_predictions(batch: CollatedBatch, check_correct: CheckCorrectFunction):
@@ -88,7 +88,16 @@ def get_optim(models: List[Retriever], options: TrainOptions, checkpoint = None)
     ], lr=options.lr, weight_decay=options.wd)
     if checkpoint is not None:
         optimizer.load_state_dict(checkpoint)
-    return optimizer, retriever_params + encoder_params
+    if options.lr_sched == LRSchedule.LINEAR.value:
+        lr_scheduler = torch.optim.lr_scheduler.LinearLR(
+            optimizer=optimizer, start_factor=1.0, end_factor=0.0, total_iters=options.epochs)
+    elif options.lr_sched == LRSchedule.CYCLE.value:
+        lr_scheduler = torch.optim.lr_scheduler.OneCycleLR(
+            optimizer=optimizer, max_lr=[group["lr"] for group in optimizer.param_groups], total_steps=options.epochs, pct_start=0.1, anneal_strategy="linear"
+        )
+    else:
+        lr_scheduler = None
+    return optimizer, lr_scheduler, retriever_params + encoder_params
 
 def polyak_update(source: torch.nn.Module, target: torch.nn.Module, tau: float):
     for source_param, target_param in zip(source.parameters(), target.parameters()):
@@ -127,7 +136,7 @@ def train_reticl(get_data: GetDataFunction, process_sample: ProcessDataFunction,
         val_est_model.train()
     else:
         val_est_model = None
-    optimizer, retriever_params = get_optim(
+    optimizer, scheduler, retriever_params = get_optim(
         [retriever, val_est_model] if val_est_model is not None else [retriever],
         options, checkpoint["optimizer"] if checkpoint else None
     )
@@ -138,12 +147,16 @@ def train_reticl(get_data: GetDataFunction, process_sample: ProcessDataFunction,
         if options.sep_val_model:
             critics = [retriever_model(options, True, False) for _ in range(num_critics)]
             critic_targets = [retriever_model(options, True, False) for _ in range(num_critics)]
-            critic_optims = [get_optim([critic], options)[0] for critic in critics]
+            cosps = [get_optim([critic], options) for critic in critics]
+            critic_optims = [cosp[0] for cosp in cosps]
+            critic_schedulers = [cosp[1] for cosp in cosps]
             for critic, target in zip(critics, critic_targets):
                 target.load_state_dict(critic.state_dict())
                 target.eval()
         else:
-            critic_optims = [get_optim([retriever], options)[0] for _ in range(num_critics)]
+            cosps = [get_optim([retriever], options) for _ in range(num_critics)]
+            critic_optims = [cosp[0] for cosp in cosps]
+            critic_schedulers = [cosp[1] for cosp in cosps]
             target = retriever_model(options, num_critics=2)
             target.load_state_dict(retriever.state_dict())
             target.eval()
@@ -191,10 +204,12 @@ def train_reticl(get_data: GetDataFunction, process_sample: ProcessDataFunction,
         val_example_set = set()
 
         # Update exploration parameters
+        cur_lr = optimizer.param_groups[0]["lr"]
+        print("LR:", cur_lr)
         if options.sm == SamplingMethod.EPSILON_GREEDY.value:
             dataset.update_epsilon(options.eg_eps * options.expl_decay_rate ** epoch)
             print("Epsilon:", dataset.epsilon)
-        elif options.rl_algo == RLAlgorithm.PPO.value:
+        else:
             e_coef = options.e_coef * max(1 - (1 - options.expl_decay_rate) * epoch / options.epochs, 0)
             print("Entropy Coefficient:", e_coef)
 
@@ -285,16 +300,13 @@ def train_reticl(get_data: GetDataFunction, process_sample: ProcessDataFunction,
                 # Get value function loss
                 vf_loss = torch.nn.MSELoss(reduction="none")(value_estimates, returns)
 
-                # Maximize entropy - encourages exploration by flattening action distribution
-                entropy = get_entropy(activations)
-
                 # Get final loss
                 # TODO: should add supplemental losses after taking mean?
                 if options.sep_val_model:
-                    loss = clip_loss - e_coef * entropy
+                    loss = clip_loss
                     vf_loss.mean().backward()
                 else:
-                    loss = clip_loss + options.v_coef * vf_loss - e_coef * entropy
+                    loss = clip_loss + options.v_coef * vf_loss
             elif options.rl_algo == RLAlgorithm.DSAC.value:
                 # Implementation roughly based on https://github.com/p-christ/Deep-Reinforcement-Learning-Algorithms-with-PyTorch
                 for _ in range(options.updates_per_batch):
@@ -378,6 +390,9 @@ def train_reticl(get_data: GetDataFunction, process_sample: ProcessDataFunction,
 
             # Do gradient step (DSAC has its own)
             if options.rl_algo != RLAlgorithm.DSAC.value:
+                # Maximize entropy - encourages exploration by flattening action distribution
+                entropy = get_entropy(activations)
+                loss = loss - e_coef * entropy
                 loss[loss_mask] = 0
                 loss.mean().backward()
                 torch.nn.utils.clip_grad_norm_(retriever_params, options.grad_clip)
@@ -390,6 +405,13 @@ def train_reticl(get_data: GetDataFunction, process_sample: ProcessDataFunction,
             # If training encoder, re-compute corpus encodings (after each training step)
             if retriever.encoder is not None:
                 dataset.compute_corpus_encodings(False)
+
+        # Update learning rate schedulers
+        if scheduler is not None:
+            scheduler.step()
+            if options.rl_algo == RLAlgorithm.DSAC.value:
+                for critic_scheduler in critic_schedulers:
+                    critic_scheduler.step()
 
         with torch.no_grad():
             # Re-compute corpus encodings for validation set if training encoder
@@ -431,6 +453,7 @@ def train_reticl(get_data: GetDataFunction, process_sample: ProcessDataFunction,
                 "val_entropy": val_entropy,
                 "epsilon": dataset.epsilon if options.sm == SamplingMethod.EPSILON_GREEDY.value else None,
                 "alpha": alpha if options.rl_algo == RLAlgorithm.DSAC.value else None,
+                "lr": cur_lr,
             })
         print(f"Epoch {epoch + 1}, Loss: {avg_loss:.4f}, Reward: {avg_reward:.4f}, Val Reward: {avg_val_reward:.4f}, "
               f"Val Acc: {avg_val_accuracy:.4f}, Train Examples: {len(train_example_set)}, Val Examples: {len(val_example_set)}")

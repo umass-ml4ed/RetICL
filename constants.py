@@ -49,6 +49,11 @@ class Init(Enum):
     DEFAULT = "default"
     ORTHOGONAL = "ortho"
 
+class LRSchedule(Enum):
+    NONE = "none"
+    LINEAR = "linear"
+    CYCLE = "cycle"
+
 MODEL_TO_EMB_SIZE = {
     "all-mpnet-base-v2": 768,
     "all-MiniLM-L12-v2": 384,

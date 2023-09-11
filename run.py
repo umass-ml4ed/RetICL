@@ -15,7 +15,7 @@ from data_loading.svamp import svamp_get_data, svamp_process_sample, svamp_check
 from data_loading.feedback import eedi_get_data, eedi_process_sample, eedi_check_correct
 from data_loading.qasc import qasc_get_data, qasc_process_sample, qasc_check_correct, qasc_complexity_metric
 from models.generator import GeneratorCM
-from constants import Datasets, RLAlgorithm, SamplingMethod, Reward, EncoderModelType, ModelType, Pooling, Init
+from constants import Datasets, RLAlgorithm, SamplingMethod, Reward, EncoderModelType, ModelType, Pooling, Init, LRSchedule
 from utils import initialize_seeds, device, TrainOptions
 
 def get_dataset_functions(options_dict: dict) -> Tuple[
@@ -61,8 +61,8 @@ def main():
     parser.add_argument("--sm", type=str, choices=[sm.value for sm in SamplingMethod], help="Sampling method for example retrieval")
     parser.add_argument("--model_type", type=str, choices=[mt.value for mt in ModelType], help="Type of RetICL model to use")
     parser.add_argument("--model_name", type=str, help="Name of RetICL model")
-    parser.add_argument("--generator_model", type=str, help="Name of pre-trained model for text generation", default="gpt3")
-    parser.add_argument("--gpt3_model", type=str, help="Specific model when using GPT-3 for generation", default="code-davinci-002")
+    parser.add_argument("--generator_model", type=str, help="Name of pre-trained model for text generation. Set to 'gpt3' to use OpenAI, otherwise model is loaded from huggingface.", default="gpt3")
+    parser.add_argument("--gpt3_model", type=str, help="Specific model when using OpenAI for generation", default="code-davinci-002")
     parser.add_argument("--gen_batch_size", type=int, help="Batch size for generator")
     parser.add_argument("--wandb", action="store_true", help="Use Weights & Biases for logging")
     parser.add_argument("--lr", type=float, help="Learning rate")
@@ -75,6 +75,7 @@ def main():
     parser.add_argument("--train_batch_size", type=int, help="Off-policy: batch size to draw from replay buffer each training update")
     parser.add_argument("--episodes_before_train", type=int, help="Off-policy: number of episodes to observe before training")
     parser.add_argument("--init", type=str, choices=[i.value for i in Init], help="Initialization method for model parameters")
+    parser.add_argument("--lr_sched", type=str, choices=[lr.value for lr in LRSchedule], help="Learning rate schedule strategy")
     parser.add_argument("--epochs", type=int, help="Number of epochs")
     parser.add_argument("--batch_size", type=int, help="Number of episodes to observe per batch (equivalent to train batch size for on-policy)")
     parser.add_argument("--grad_accum_steps", type=int, help="Number of gradient accumulation steps for encoder fine-tuning")

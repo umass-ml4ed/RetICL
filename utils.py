@@ -4,7 +4,7 @@ import numpy as np
 import torch
 from torch import nn
 
-from constants import Datasets, RLAlgorithm, SamplingMethod, Reward, EncoderModelType, ModelType, Pooling, Init, DEFAULT_MAX_GEN_TOKENS
+from constants import Datasets, RLAlgorithm, SamplingMethod, Reward, EncoderModelType, ModelType, Pooling, Init, LRSchedule, DEFAULT_MAX_GEN_TOKENS
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -53,6 +53,7 @@ class TrainOptions:
         self.train_batch_size: int = options_dict.get("train_batch_size", 20)
         self.episodes_before_train: int = options_dict.get("episodes_before_train", 1000)
         self.init: str = options_dict.get("init", Init.ORTHOGONAL.value)
+        self.lr_sched: str = options_dict.get("lr_sched", LRSchedule.NONE.value)
         self.epochs: int = options_dict.get("epochs", 20)
         self.batch_size: int = options_dict.get("batch_size", 20)
         self.grad_accum_steps: int = options_dict.get("grad_accum_steps", 1)

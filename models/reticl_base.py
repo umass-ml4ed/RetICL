@@ -42,6 +42,21 @@ class RetICLBase(nn.Module):
         else:
             self.encoder = None
 
+    def state_dict(self, destination=None, prefix='', keep_vars=False):
+        state_dict = super().state_dict(destination=destination, prefix=prefix, keep_vars=keep_vars)
+        if self.encoder is not None and not self.options.ft_encoder:
+            for key in list(state_dict.keys()):
+                if key.startswith("encoder.model."):
+                    del state_dict[key]
+        return state_dict
+
+    def load_state_dict(self, state_dict, strict: bool = True):
+        if self.encoder is not None and not self.options.ft_encoder:
+            encoder_model_sd = self.encoder.model.state_dict()
+            for key in encoder_model_sd.keys():
+                state_dict[f"encoder.model.{key}"] = encoder_model_sd[key]
+        return super().load_state_dict(state_dict, strict)
+
     @abstractmethod
     def get_latent_states(self, current_sample_encodings: torch.Tensor, example_encodings: torch.Tensor, **kwargs) -> torch.Tensor:
         raise NotImplementedError()
