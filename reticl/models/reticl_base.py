@@ -2,9 +2,9 @@ from abc import abstractmethod
 import torch
 from torch import nn
 
-from models.encoder import SBERTEncoder
-from utils import TrainOptions, is_pg, orthogonal_init_
-from constants import MODEL_TO_EMB_SIZE, Init, Pooling
+from reticl.models.encoder import SBERTEncoder
+from reticl.utils import TrainOptions, is_pg, orthogonal_init_
+from reticl.constants import MODEL_TO_EMB_SIZE, Init, Pooling
 
 class RetICLBase(nn.Module):
     def __init__(self, options: TrainOptions, use_bias: bool, mask_prev_examples: bool, num_critics: int):

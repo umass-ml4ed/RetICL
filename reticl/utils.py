@@ -4,7 +4,7 @@ import numpy as np
 import torch
 from torch import nn
 
-from constants import Datasets, RLAlgorithm, SamplingMethod, Reward, EncoderModelType, ModelType, Pooling, Init, LRSchedule, DEFAULT_MAX_GEN_TOKENS
+from reticl.constants import Datasets, RLAlgorithm, SamplingMethod, Reward, EncoderModelType, ModelType, Pooling, Init, LRSchedule, DEFAULT_MAX_GEN_TOKENS
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 

@@ -6,14 +6,14 @@ import wandb
 import pandas
 import numpy as np
 
-from models.retriever import Retriever, retriever_model
-from models.generator import Generator
-from data_loading.data_types import GetDataFunction, ProcessDataFunction, CheckCorrectFunction, ComplexityMetric
-from data_loading.reticl_dataset import RetICLDataset, Collator
-from constants import Datasets, SamplingMethod
-from utils import TrainOptions, device
+from reticl.models.retriever import Retriever, retriever_model
+from reticl.models.generator import Generator
+from reticl.data_loading.data_types import DatasetConfig
+from reticl.data_loading.reticl_dataset import RetICLDataset, Collator
+from reticl.constants import Datasets, SamplingMethod
+from reticl.utils import TrainOptions, device
 
-def exhaustive_eval(dataset: RetICLDataset, check_correct: CheckCorrectFunction, options: TrainOptions):
+def exhaustive_eval(dataset: RetICLDataset, dataset_config: DatasetConfig, options: TrainOptions):
     # Get maximum possible performance
     prompts: List[str] = []
     labels: List[str] = []
@@ -42,7 +42,10 @@ def exhaustive_eval(dataset: RetICLDataset, check_correct: CheckCorrectFunction,
         for prompt_idx in range(0, len(all_prompt_cands), options.batch_size):
             prompt_cands = all_prompt_cands[prompt_idx : prompt_idx + options.batch_size]
             pred_cands = [pred["text"] for pred in Generator.generate(prompts=prompt_cands)]
-            correct = [check_correct(meta_datas[-1], pred) for pred in pred_cands]
+            if dataset_config.get("check_correct_batch"):
+                correct = dataset_config["check_correct_batch"]([meta_datas[-1]] * len(pred_cands), pred_cands).tolist()
+            else:
+                correct = [dataset_config["check_correct"](meta_datas[-1], pred) for pred in pred_cands]
             if any(correct):
                 correct_found = True
                 first_correct = np.argmax(correct)
@@ -81,23 +84,25 @@ def policy_eval(dataset: RetICLDataset, options: TrainOptions):
 
     return prompts, labels, meta_datas, preds, example_set
 
-def evaluate_reticl(run, get_data: GetDataFunction, process_sample: ProcessDataFunction, check_correct: CheckCorrectFunction,
-            complexity_metric: Optional[ComplexityMetric], retriever: Optional[Retriever], split: str, options: TrainOptions):
+def evaluate_reticl(run, dataset_config: DatasetConfig, retriever: Optional[Retriever], split: str, options: TrainOptions):
     with torch.no_grad():
         if not run and options.wandb:
             run = wandb.init(project="reticl", config=options.as_dict())
         if retriever:
             retriever.eval()
-        dataset = RetICLDataset(get_data, process_sample, split, retriever, options, complexity_metric=complexity_metric)
+        dataset = RetICLDataset(dataset_config, split, retriever, options)
         dataset.set_greedy(True) # Use greedy sampling for policy-based example retrieval
 
         # Collect predictions and labels over the dataset
         if options.sm == SamplingMethod.EXHAUSTIVE.value:
-            prompts, labels, meta_datas, preds, example_set = exhaustive_eval(dataset, check_correct, options)
+            prompts, labels, meta_datas, preds, example_set = exhaustive_eval(dataset, dataset_config, options)
         else:
             prompts, labels, meta_datas, preds, example_set = policy_eval(dataset, options)
 
-        correct = np.array([check_correct(meta_data, pred) for meta_data, pred in zip(meta_datas, preds)])
+        if dataset_config.get("check_correct_batch"):
+            correct = dataset_config["check_correct_batch"](meta_datas, preds).numpy()
+        else:
+            correct = np.array([dataset_config["check_correct"](meta_data, pred) for meta_data, pred in zip(meta_datas, preds)])
         acc = correct.mean() * 100
         if options.dataset == Datasets.TABMWP.value:
             mc_acc = correct[[meta_data["ques_type"] == "multi_choice" for meta_data in meta_datas]].mean() * 100
@@ -130,15 +135,14 @@ def evaluate_reticl(run, get_data: GetDataFunction, process_sample: ProcessDataF
             df["type"] = [meta_data["ques_type"] for meta_data in meta_datas]
         df.to_csv(out_filename)
 
-def evaluate(get_data: GetDataFunction, process_sample: ProcessDataFunction, check_correct: CheckCorrectFunction,
-             complexity_metric: Optional[ComplexityMetric], split: str, options_dict: dict):
+def evaluate(dataset_config: DatasetConfig, split: str, options_dict: dict):
     options = TrainOptions(options_dict)
     if options.model_name:
         retriever = retriever_model(options)
         retriever.load_state_dict(torch.load(f"{options.model_name}.pt", map_location=device))
     else:
         retriever = None
-    evaluate_reticl(None, get_data, process_sample, check_correct, complexity_metric, retriever, split, options)
+    evaluate_reticl(None, dataset_config, retriever, split, options)
 
 def answer_missing(df: pandas.DataFrame, dataset: str):
     # indicator = "The answer is " if dataset == Datasets.TABMWP.value else "Final Answer: "

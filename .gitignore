@@ -1,2 +1,13 @@
 __pycache__
 *.pyc
+*.pt
+*.png
+
+generator_cache*
+
+grade-school-math
+MATH 2
+QASC_Dataset
+results
+SVAMP
+tabmwp

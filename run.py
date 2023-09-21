@@ -1,38 +1,33 @@
-from typing import Tuple, Optional
 import argparse
 import torch
 
-from training.train_reticl import train_reticl
-from training.train_gpt2_encoder import finetune_gpt2
-from training.train_bert_encoder import finetune_bert
-from evaluate import evaluate, error_analysis
-from analysis import visualize_representations
-from data_loading.data_types import GetDataFunction, ProcessDataFunction, CheckCorrectFunction, ComplexityMetric
-from data_loading.tabmwp import tabmwp_get_data, tabmwp_process_sample, tabmwp_check_correct, tabmwp_complexity_metric
-from data_loading.gsm8k import gsm8k_get_data, gsm8k_process_sample, gsm8k_check_correct, gsm8k_complexity_metric
-from data_loading.math import math_get_data, math_process_sample, math_check_correct
-from data_loading.svamp import svamp_get_data, svamp_process_sample, svamp_check_correct
-from data_loading.feedback import eedi_get_data, eedi_process_sample, eedi_check_correct
-from data_loading.qasc import qasc_get_data, qasc_process_sample, qasc_check_correct, qasc_complexity_metric
-from models.generator import GeneratorCM
-from constants import Datasets, RLAlgorithm, SamplingMethod, Reward, EncoderModelType, ModelType, Pooling, Init, LRSchedule
-from utils import initialize_seeds, device, TrainOptions
+from reticl.training.train_reticl import train_reticl
+from reticl.training.train_gpt2_encoder import finetune_gpt2
+from reticl.training.train_bert_encoder import finetune_bert
+from reticl.evaluate import evaluate, error_analysis
+from reticl.analysis import visualize_representations
+from reticl.data_loading.data_types import DatasetConfig
+from reticl.data_loading.tabmwp import TABMWP_CONFIG
+from reticl.data_loading.gsm8k import GSM8K_CONFIG
+from reticl.data_loading.qasc import QASC_CONFIG
+from reticl.data_loading.math import MATH_CONFIG
+from reticl.data_loading.svamp import SVAMP_CONFIG
+from reticl.models.generator import GeneratorCM
+from reticl.constants import Datasets, RLAlgorithm, SamplingMethod, Reward, EncoderModelType, ModelType, Pooling, Init, LRSchedule
+from reticl.utils import initialize_seeds, device, TrainOptions
 
-def get_dataset_functions(options_dict: dict) -> Tuple[
-        GetDataFunction, ProcessDataFunction, CheckCorrectFunction, Optional[ComplexityMetric]]:
+def get_dataset_config(options_dict: dict) -> DatasetConfig:
     options = TrainOptions(options_dict)
     if options.dataset == Datasets.TABMWP.value:
-        return tabmwp_get_data, tabmwp_process_sample, tabmwp_check_correct, tabmwp_complexity_metric
+        return TABMWP_CONFIG
     if options.dataset == Datasets.GSM8K.value:
-        return gsm8k_get_data, gsm8k_process_sample, gsm8k_check_correct, gsm8k_complexity_metric
-    if options.dataset == Datasets.MATH.value:
-        return math_get_data, math_process_sample, math_check_correct, None
-    if options.dataset == Datasets.SVAMP.value:
-        return svamp_get_data, svamp_process_sample, svamp_check_correct, None
-    if options.dataset == Datasets.FEEDBACK.value:
-        return eedi_get_data, eedi_process_sample, eedi_check_correct, None
+        return GSM8K_CONFIG
     if options.dataset == Datasets.QASC.value:
-        return qasc_get_data, qasc_process_sample, qasc_check_correct, qasc_complexity_metric
+        return QASC_CONFIG
+    if options.dataset == Datasets.MATH.value:
+        return MATH_CONFIG
+    if options.dataset == Datasets.SVAMP.value:
+        return SVAMP_CONFIG
     raise Exception(f"Dataset {options.dataset} not supported!")
 
 def bool_type(arg: str):
@@ -111,21 +106,21 @@ def main():
     initialize_seeds(args.rseed)
     torch.use_deterministic_algorithms(args.deterministic, warn_only=True)
 
-    get_data, process_data, check_correct, complexity_metric = get_dataset_functions(arg_dict)
+    dataset_config = get_dataset_config(arg_dict)
     if args.train or args.eval:
         with GeneratorCM(arg_dict): # Load/save generator prediction cache on program start/exit
             if args.train:
-                train_reticl(get_data, process_data, check_correct, "train", "dev", arg_dict)
+                train_reticl(dataset_config, "train", "dev", arg_dict)
             if args.eval:
-                evaluate(get_data, process_data, check_correct, complexity_metric, args.eval, arg_dict)
+                evaluate(dataset_config, args.eval, arg_dict)
     if args.finetune_gpt2:
-        finetune_gpt2(get_data, process_data, arg_dict)
+        finetune_gpt2(dataset_config, arg_dict)
     if args.finetune_bert:
-        finetune_bert(get_data, process_data, arg_dict)
+        finetune_bert(dataset_config, arg_dict)
     if args.error_analysis:
         error_analysis(*args.error_analysis, arg_dict)
     if args.viz:
-        visualize_representations(get_data, process_data, arg_dict)
+        visualize_representations(dataset_config, arg_dict)
 
 if __name__ == "__main__":
     main()

@@ -4,17 +4,17 @@ from torch.utils.data import Dataset
 from torch.nn.utils.rnn import pad_sequence
 from tqdm import tqdm
 
-from data_loading.data_types import GetDataFunction, ProcessDataFunction
-from utils import device, TrainOptions
+from reticl.data_loading.data_types import DatasetConfig
+from reticl.utils import device, TrainOptions
 
 class GPT2Dataset(Dataset):
-    def __init__(self, get_data: GetDataFunction, process_sample: ProcessDataFunction, split: str, options: TrainOptions):
+    def __init__(self, dataset_config: DatasetConfig, split: str, options: TrainOptions):
         super().__init__()
         tokenizer = AutoTokenizer.from_pretrained("gpt2")
         tokenizer.pad_token = tokenizer.eos_token
         self.data: List[BatchEncoding] = []
-        for sample in tqdm(get_data(split, options)[0]):
-            sample = process_sample(sample)
+        for sample in tqdm(dataset_config["get_data"](split, options)[0]):
+            sample = dataset_config["process_sample"](sample)
             self.data.append(tokenizer(sample["encoder_context"] + sample["encoder_label"], return_tensors="pt"))
 
     def __len__(self):
@@ -31,12 +31,12 @@ class GPT2Collator:
             "attention_mask": pad_sequence([item.attention_mask[0] for item in batch], batch_first=True, padding_value=0)
         }
 
-def finetune_gpt2(get_data: GetDataFunction, process_sample: ProcessDataFunction, options_dict: dict):
+def finetune_gpt2(dataset_config: DatasetConfig, options_dict: dict):
     options = TrainOptions(options_dict)
     model = GPT2LMHeadModel.from_pretrained("gpt2").to(device)
 
-    train_dataset = GPT2Dataset(get_data, process_sample, "train", options)
-    val_dataset = GPT2Dataset(get_data, process_sample, "dev", options)
+    train_dataset = GPT2Dataset(dataset_config, "train", options)
+    val_dataset = GPT2Dataset(dataset_config, "dev", options)
 
     training_args = TrainingArguments(
         output_dir=options.model_name,

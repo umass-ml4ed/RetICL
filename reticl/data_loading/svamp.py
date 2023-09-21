@@ -3,8 +3,8 @@ import json
 import random
 import re
 
-from data_loading.data_types import DataSample
-from utils import TrainOptions
+from reticl.data_loading.data_types import DataSample
+from reticl.utils import TrainOptions
 
 def svamp_load_data() -> List[dict]:
     with open("SVAMP/SVAMP.json") as data_file:
@@ -58,3 +58,9 @@ def svamp_check_correct(src_meta_data: dict, pred_text: str):
         return False
     pred_answer = match[-1].strip().strip(".")
     return str(src_meta_data["Answer"]) == pred_answer
+
+SVAMP_CONFIG = {
+    "get_data": svamp_get_data,
+    "process_sample": svamp_process_sample,
+    "check_correct": svamp_check_correct,
+}

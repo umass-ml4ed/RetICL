@@ -1,10 +1,10 @@
 from typing import Union
 
-from models.reticl_rnn import RetICLRNN
-from models.reticl_attn import RetICLAttn
-from models.reticl_ind import RetICLInd
-from constants import ModelType
-from utils import TrainOptions, device
+from reticl.models.reticl_rnn import RetICLRNN
+from reticl.models.reticl_attn import RetICLAttn
+from reticl.models.reticl_ind import RetICLInd
+from reticl.constants import ModelType
+from reticl.utils import TrainOptions, device
 
 Retriever = Union[RetICLRNN, RetICLAttn, RetICLInd]
 

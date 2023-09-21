@@ -10,8 +10,8 @@ try:
 except ModuleNotFoundError:
     pass
 
-from models.gpt3 import gpt3_completion_parallel, gpt3_completion_with_batching
-from utils import device, TrainOptions
+from reticl.models.gpt3 import gpt3_completion_parallel, gpt3_completion_with_batching
+from reticl.utils import device, TrainOptions
 
 class GeneratorResult(TypedDict):
     text: str

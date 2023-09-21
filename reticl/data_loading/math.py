@@ -4,8 +4,8 @@ import random
 import re
 import os
 
-from data_loading.data_types import DataSample
-from utils import TrainOptions
+from reticl.data_loading.data_types import DataSample
+from reticl.utils import TrainOptions
 
 def extract_final_solution(solution: str):
     start_idx = solution.find("\\boxed{")
@@ -102,3 +102,9 @@ def extract_answer(solution: str, pattern: re.Pattern):
 def math_check_correct(src_meta_data: dict, pred_text: str):
     pred_pattern = re.compile(r"Final Answer: (.*)$")
     return clean_answer(src_meta_data["final_answer"]) == clean_answer(extract_answer(pred_text, pred_pattern))
+
+MATH_CONFIG = {
+    "get_data": math_get_data,
+    "process_sample": math_process_sample,
+    "check_correct": math_check_correct,
+}

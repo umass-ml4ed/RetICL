@@ -3,8 +3,8 @@ import json
 import random
 import re
 
-from data_loading.data_types import DataSample
-from utils import TrainOptions
+from reticl.data_loading.data_types import DataSample
+from reticl.utils import TrainOptions
 
 def qasc_load_data(split: str) -> List[dict]:
     with open(f"QASC_Dataset/{split}.jsonl") as data_file:
@@ -62,3 +62,10 @@ def qasc_check_correct(src_meta_data: dict, pred_text: str):
 
 def qasc_complexity_metric(sample: DataSample):
     return sample["lm_label"].count(" ")
+
+QASC_CONFIG = {
+    "get_data": qasc_get_data,
+    "process_sample": qasc_process_sample,
+    "check_correct": qasc_check_correct,
+    "complexity_metric": qasc_complexity_metric,
+}

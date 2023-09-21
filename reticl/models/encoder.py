@@ -1,11 +1,11 @@
-from typing import Any, List, Mapping
+from typing import List
 from transformers import AutoTokenizer, AutoModel
 import torch
 from torch import nn
 import torch.nn.functional as F
 
-from constants import MODEL_TO_EMB_SIZE, Pooling
-from utils import device, TrainOptions, max_sbert_len, orthogonal_init_
+from reticl.constants import MODEL_TO_EMB_SIZE, Pooling
+from reticl.utils import device, TrainOptions, max_sbert_len, orthogonal_init_
 
 def mean_pooling(token_embeddings, attention_mask):
     # Code taken from sbert docs: https://www.sbert.net/examples/applications/computing-embeddings/README.html

@@ -2,8 +2,8 @@ from typing import List, TypedDict, Tuple
 import torch
 import numpy as np
 
-from data_loading.reticl_dataset import ICLSample
-from utils import TrainOptions
+from reticl.data_loading.reticl_dataset import ICLSample
+from reticl.utils import TrainOptions
 
 class Episode(TypedDict):
     sample: ICLSample

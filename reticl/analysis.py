@@ -8,11 +8,11 @@ import matplotlib.pyplot as plt
 from sklearn.manifold import TSNE
 from tqdm import tqdm
 
-from models.retriever import retriever_model, Retriever
-from data_loading.data_types import GetDataFunction, ProcessDataFunction
-from data_loading.reticl_dataset import RetICLDataset, Collator
-from constants import Datasets
-from utils import TrainOptions, device
+from reticl.models.retriever import retriever_model, Retriever
+from reticl.data_loading.data_types import DatasetConfig
+from reticl.data_loading.reticl_dataset import RetICLDataset, Collator
+from reticl.constants import Datasets
+from reticl.utils import TrainOptions, device
 
 def get_problem_class(solution: str):
     # TODO: think about other ways to define this,
@@ -40,7 +40,7 @@ def get_latent_states(retriever: Retriever, dataset: RetICLDataset, options: Tra
     all_latent_states = np.concatenate(all_latent_states, axis=0)
     return all_latent_states[:, 0]
 
-def visualize_representations(get_data: GetDataFunction, process_sample: ProcessDataFunction, options_dict: dict):
+def visualize_representations(dataset_config: DatasetConfig, options_dict: dict):
     options = TrainOptions(options_dict)
     mode = "encodings"
 
@@ -58,7 +58,7 @@ def visualize_representations(get_data: GetDataFunction, process_sample: Process
         cached_encoding_matrix = torch.load(cache_filename)
     else:
         cached_encoding_matrix = None
-    dataset = RetICLDataset(get_data, process_sample, "test", retriever, options, cached_encoding_matrix=cached_encoding_matrix)
+    dataset = RetICLDataset(dataset_config, "test", retriever, options, cached_encoding_matrix=cached_encoding_matrix)
     if cached_encoding_matrix is None:
         torch.save(dataset.encoding_matrix, cache_filename)
     dataset.set_greedy(True)

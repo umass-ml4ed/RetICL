@@ -5,16 +5,16 @@ import torch
 from torch.utils.data import Dataset
 from tqdm import tqdm
 
-from data_loading.data_types import GetDataFunction, ProcessDataFunction
-from utils import device, TrainOptions
+from reticl.data_loading.data_types import DatasetConfig
+from reticl.utils import device, TrainOptions
 
 class BERTDataset(Dataset):
-    def __init__(self, get_data: GetDataFunction, process_sample: ProcessDataFunction, split: str, options: TrainOptions):
+    def __init__(self, dataset_config: DatasetConfig, split: str, options: TrainOptions):
         super().__init__()
         self.problems = []
         self.solutions = []
-        for sample in tqdm(get_data(split, options)[0]):
-            sample = process_sample(sample)
+        for sample in tqdm(dataset_config["get_data"](split, options)[0]):
+            sample = dataset_config["process_sample"](sample)
             self.problems.append(sample["encoder_context"])
             self.solutions.append(sample["encoder_label"])
 
@@ -52,12 +52,12 @@ def compute_metrics(eval_pred):
         "accuracy": (predictions == labels).sum().item() / len(predictions)
     }
 
-def finetune_bert(get_data: GetDataFunction, process_sample: ProcessDataFunction, options_dict: dict):
+def finetune_bert(dataset_config: DatasetConfig, options_dict: dict):
     options = TrainOptions(options_dict)
     model = BertForNextSentencePrediction.from_pretrained("bert-base-cased").to(device)
 
-    train_dataset = BERTDataset(get_data, process_sample, "train", options)
-    val_dataset = BERTDataset(get_data, process_sample, "dev", options)
+    train_dataset = BERTDataset(dataset_config, "train", options)
+    val_dataset = BERTDataset(dataset_config, "dev", options)
 
     training_args = TrainingArguments(
         output_dir=options.model_name,

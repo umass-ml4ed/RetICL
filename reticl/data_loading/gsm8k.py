@@ -3,8 +3,8 @@ import json
 import random
 import re
 
-from data_loading.data_types import DataSample
-from utils import TrainOptions
+from reticl.data_loading.data_types import DataSample
+from reticl.utils import TrainOptions
 
 def gsm8k_load_data(split: str) -> List[dict]:
     with open(f"grade-school-math/grade_school_math/data/{split}.jsonl") as data_file:
@@ -79,3 +79,10 @@ def gsm8k_check_correct(src_meta_data: dict, pred_text: str):
 
 def gsm8k_complexity_metric(sample: DataSample):
     return sample["lm_label"].count("\n")
+
+GSM8K_CONFIG = {
+    "get_data": gsm8k_get_data,
+    "process_sample": gsm8k_process_sample,
+    "check_correct": gsm8k_check_correct,
+    "complexity_metric": gsm8k_complexity_metric,
+}

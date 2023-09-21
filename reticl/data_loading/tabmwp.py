@@ -3,10 +3,10 @@ import json
 import random
 import re
 
-from data_loading.data_types import DataSample
-from promptPG.base_prompt import get_table_text, get_question_text, get_answer, get_solution_text
-from promptPG.utilities import normalize_answer
-from utils import TrainOptions
+from reticl.data_loading.data_types import DataSample
+from reticl.promptPG.base_prompt import get_table_text, get_question_text, get_answer, get_solution_text
+from reticl.promptPG.utilities import normalize_answer
+from reticl.utils import TrainOptions
 
 OPTION_INDS = ["A", "B", "C", "D", "E", "F"] # As defined in PromptPG code
 
@@ -84,3 +84,10 @@ def tabmwp_check_correct(src_meta_data: dict, pred_text: str):
 
 def tabmwp_complexity_metric(sample: DataSample):
     return sample["lm_label"].count("\\n")
+
+TABMWP_CONFIG = {
+    "get_data": tabmwp_get_data,
+    "process_sample": tabmwp_process_sample,
+    "check_correct": tabmwp_check_correct,
+    "complexity_metric": tabmwp_complexity_metric,
+}

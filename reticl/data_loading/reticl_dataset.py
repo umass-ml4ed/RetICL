@@ -9,11 +9,11 @@ from transformers import GPT2Model, BertModel, AutoTokenizer
 from sentence_transformers import SentenceTransformer
 import faiss
 
-from data_loading.data_types import DataSample, GetDataFunction, ProcessDataFunction, ComplexityMetric
-from models.retriever import Retriever
-from models.encoder import SBERTEncoder
-from constants import SamplingMethod, EncoderModelType
-from utils import device, TrainOptions
+from reticl.data_loading.data_types import DataSample, DatasetConfig
+from reticl.models.retriever import Retriever
+from reticl.models.encoder import SBERTEncoder
+from reticl.constants import SamplingMethod, EncoderModelType
+from reticl.utils import device, TrainOptions
 
 class ICLSample(TypedDict):
     # For evaluation
@@ -41,9 +41,9 @@ class CollatedBatch(TypedDict):
     all_example_encodings: torch.Tensor
 
 class RetICLDataset(TorchDataset):
-    def __init__(self, get_data: GetDataFunction, process_sample: ProcessDataFunction,
+    def __init__(self, dataset_config: DatasetConfig,
                  split: str, retriever: Optional[Retriever], options: TrainOptions, compute_intial_encodings: bool = True,
-                 cached_encoding_matrix: Optional[torch.Tensor] = None, complexity_metric: Optional[ComplexityMetric] = None):
+                 cached_encoding_matrix: Optional[torch.Tensor] = None):
         super().__init__()
 
         self.options = options
@@ -52,10 +52,10 @@ class RetICLDataset(TorchDataset):
         self.greedy = False
 
         # Process data samples
-        samples, corpus = get_data(split, options)
-        self.data = [process_sample(sample) for sample in samples]
+        samples, corpus = dataset_config["get_data"](split, options)
+        self.data = [dataset_config["process_sample"](sample) for sample in samples]
         if corpus:
-            self.corpus = [process_sample(sample) for sample in corpus]
+            self.corpus = [dataset_config["process_sample"](sample) for sample in corpus]
         else:
             self.corpus = self.data
 
@@ -81,8 +81,7 @@ class RetICLDataset(TorchDataset):
                     self.encoder = SentenceTransformer(self.options.encoder_model or "all-distilroberta-v1")
                 self.compute_encodings(cached_encoding_matrix=cached_encoding_matrix)
         if options.sm == SamplingMethod.COMPLEX.value:
-            if complexity_metric is None:
-                complexity_metric = lambda sample: sample["lm_label"].count("\n")
+            complexity_metric = dataset_config.get("complexity_metric", lambda sample: sample["lm_label"].count("\n"))
             corpus_complexity = [-complexity_metric(sample) for sample in self.corpus]
             self.complex_example_idxs = np.flip(np.argsort(corpus_complexity)[:options.num_examples]).copy()
 

@@ -7,27 +7,31 @@ from tqdm import tqdm
 import wandb
 import nltk
 
-from models.retriever import retriever_model, Retriever
-from models.generator import Generator
-from data_loading.data_types import GetDataFunction, ProcessDataFunction, CheckCorrectFunction
-from data_loading.reticl_dataset import RetICLDataset, Collator, CollatedBatch
-from training.replay_buffer import ReplayBuffer
-from evaluate import evaluate_reticl
-from constants import SamplingMethod, RLAlgorithm, Reward, LRSchedule
-from utils import TrainOptions, device, is_pg
+from reticl.models.retriever import retriever_model, Retriever
+from reticl.models.generator import Generator
+from reticl.data_loading.data_types import DatasetConfig
+from reticl.data_loading.reticl_dataset import RetICLDataset, Collator, CollatedBatch
+from reticl.training.replay_buffer import ReplayBuffer
+from reticl.evaluate import evaluate_reticl
+from reticl.constants import SamplingMethod, RLAlgorithm, Reward, LRSchedule
+from reticl.utils import TrainOptions, device, is_pg
 
-def get_predictions(batch: CollatedBatch, check_correct: CheckCorrectFunction):
+def get_predictions(batch: CollatedBatch, dataset_config: DatasetConfig):
     # Generate predictions given retrieved context and check correctness
     predictions = Generator.generate(**batch)
-    correct = torch.Tensor([
-        check_correct(src_meta_data, pred["text"])
-        for src_meta_data, pred in zip(batch["meta_data"], predictions)
-    ])
+    if dataset_config.get("check_correct_batch"):
+        correct = dataset_config["check_correct_batch"](
+            batch["meta_data"], [pred["text"] for pred in predictions])
+    else:
+        correct = torch.Tensor([
+            dataset_config["check_correct"](src_meta_data, pred["text"])
+            for src_meta_data, pred in zip(batch["meta_data"], predictions)
+        ])
     return predictions, correct
 
-def get_rewards(batch: CollatedBatch, check_correct: CheckCorrectFunction, options: TrainOptions):
+def get_rewards(batch: CollatedBatch, dataset_config: DatasetConfig, options: TrainOptions):
     if options.reward in (Reward.EXACT.value, Reward.EXACT_AND_PPL.value, Reward.EXACT_AND_BLEU.value):
-        predictions, correct = get_predictions(batch, check_correct)
+        predictions, correct = get_predictions(batch, dataset_config)
 
         if options.reward == Reward.EXACT.value:
             # Reward is 1 if prediction is correct, -1 otherwise
@@ -103,8 +107,7 @@ def polyak_update(source: torch.nn.Module, target: torch.nn.Module, tau: float):
     for source_param, target_param in zip(source.parameters(), target.parameters()):
         target_param.data.copy_(tau * source_param.data + (1 - tau) * target_param.data)
 
-def train_reticl(get_data: GetDataFunction, process_sample: ProcessDataFunction, check_correct: CheckCorrectFunction,
-                 train_split: str, dev_split: str, options_dict: dict):
+def train_reticl(dataset_config: DatasetConfig, train_split: str, dev_split: str, options_dict: dict):
     options = TrainOptions(options_dict)
     if options.wandb:
         run = wandb.init(project="reticl", config=options.as_dict())
@@ -165,8 +168,8 @@ def train_reticl(get_data: GetDataFunction, process_sample: ProcessDataFunction,
         target_entropy = options.e_coef * torch.log(torch.tensor(options.corpus_size))
 
     # Create train/val datasets/loaders
-    dataset = RetICLDataset(get_data, process_sample, train_split, retriever, options)
-    val_set = RetICLDataset(get_data, process_sample, dev_split, retriever, options, False)
+    dataset = RetICLDataset(dataset_config, train_split, retriever, options)
+    val_set = RetICLDataset(dataset_config, dev_split, retriever, options, False)
     val_set.set_greedy(True) # Use greedy retrieval for validation
     data_loader = DataLoader(
         dataset,
@@ -219,7 +222,7 @@ def train_reticl(get_data: GetDataFunction, process_sample: ProcessDataFunction,
             batch_size, max_num_examples = batch["example_encodings"].shape[:2]
 
             # Calculate rewards for batch - only applied to final example in sequence
-            rewards = get_rewards(batch, check_correct, options).to(device) # (N)
+            rewards = get_rewards(batch, dataset_config, options).to(device) # (N)
             rewards = F.pad(rewards.unsqueeze(1), (max_num_examples - 1, 0)) # (N x L)
             total_reward += rewards.detach().cpu().numpy().sum()
 
@@ -426,9 +429,9 @@ def train_reticl(get_data: GetDataFunction, process_sample: ProcessDataFunction,
                 for example_idx in batch["policy_example_indices"].view(-1):
                     val_example_set.add(example_idx.item())
 
-                rewards = get_rewards(batch, check_correct, options).to(device)
+                rewards = get_rewards(batch, dataset_config, options).to(device)
                 val_reward += rewards.detach().cpu().numpy().sum()
-                _, correct = get_predictions(batch, check_correct)
+                _, correct = get_predictions(batch, dataset_config)
                 val_correct += correct.detach().cpu().numpy().sum()
 
                 if is_pg(options):
@@ -479,4 +482,4 @@ def train_reticl(get_data: GetDataFunction, process_sample: ProcessDataFunction,
     final_model = best_model if options.save_best else retriever
     if not options.save_best:
         torch.save(final_model.state_dict(), f"{options.model_name}.pt")
-    evaluate_reticl(run, get_data, process_sample, check_correct, None, final_model, dev_split, options)
+    evaluate_reticl(run, dataset_config, final_model, dev_split, options)

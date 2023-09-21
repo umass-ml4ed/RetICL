@@ -5,7 +5,6 @@ class Datasets(Enum):
     GSM8K = "gsm8k"
     MATH = "math"
     SVAMP = "svamp"
-    FEEDBACK = "feedback"
     QASC = "qasc"
 
 class ModelType(Enum):

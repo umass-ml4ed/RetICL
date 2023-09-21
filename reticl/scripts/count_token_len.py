@@ -1,11 +1,11 @@
 from transformers import GPT2TokenizerFast
 import torch
 
-from utils import TrainOptions
-from data_loading.tabmwp import tabmwp_get_data
-from data_loading.gsm8k import gsm8k_get_data
-from data_loading.math import math_get_data
-from data_loading.qasc import qasc_get_data
+from reticl.utils import TrainOptions
+from reticl.data_loading.tabmwp import tabmwp_get_data
+from reticl.data_loading.gsm8k import gsm8k_get_data
+from reticl.data_loading.math import math_get_data
+from reticl.data_loading.qasc import qasc_get_data
 
 def get_sol(dataset, sample):
     if dataset == "qasc":
