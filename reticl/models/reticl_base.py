@@ -45,38 +45,49 @@ class RetICLBase(nn.Module):
     def state_dict(self, destination=None, prefix='', keep_vars=False):
         state_dict = super().state_dict(destination=destination, prefix=prefix, keep_vars=keep_vars)
         if self.encoder is not None and not self.options.ft_encoder:
+            # If not finetuning encoder then don't save parameters to save space
             for key in list(state_dict.keys()):
                 if key.startswith("encoder.model."):
                     del state_dict[key]
         return state_dict
 
     def load_state_dict(self, state_dict, strict: bool = True):
-        if self.encoder is not None and not self.options.ft_encoder:
-            encoder_model_sd = self.encoder.model.state_dict()
-            for key in encoder_model_sd.keys():
-                state_dict[f"encoder.model.{key}"] = encoder_model_sd[key]
+        if self.encoder is not None:
+            if not any([key.startswith("encoder") for key in state_dict]):
+                # If pretrained model doesn't have encoder then copy initial values
+                for key, value in self.encoder.state_dict().items():
+                    state_dict[f"encoder.{key}"] = value
+            elif not self.options.ft_encoder:
+                # If not finetuning encoder then copy initial model values
+                for key, value in  self.encoder.model.state_dict().items():
+                    state_dict[f"encoder.model.{key}"] = value
         return super().load_state_dict(state_dict, strict)
 
     @abstractmethod
     def get_latent_states(self, current_sample_encodings: torch.Tensor, example_encodings: torch.Tensor, **kwargs) -> torch.Tensor:
         raise NotImplementedError()
 
-    @abstractmethod
     def get_last_latent_state(self, current_sample_encoding: torch.Tensor, example_encodings: torch.Tensor) -> torch.Tensor:
-        raise NotImplementedError()
+        latent_states = self.get_latent_states(current_sample_encoding.unsqueeze(0), example_encodings.unsqueeze(0))
+        return latent_states[0, -1]
 
     def get_query_vector(self, current_sample_encoding: torch.Tensor, example_encodings: torch.Tensor) -> torch.Tensor:
         return torch.matmul(self.get_last_latent_state(current_sample_encoding, example_encodings), self.bilinear)
 
-    def get_last_vfe(self, current_sample_encoding: torch.Tensor, example_encodings: torch.Tensor) -> torch.Tensor:
-        h_t = self.get_last_latent_state(current_sample_encoding, example_encodings)
+    def get_last_vfe(self, current_sample_encodings: torch.Tensor, example_encodings: torch.Tensor) -> torch.Tensor:
+        h_t = self.get_last_latent_state(current_sample_encodings, example_encodings)
         return self.value_fn_estimator(h_t).squeeze()
+
+    def get_vfe(self, current_sample_encodings: torch.Tensor, example_encodings: torch.Tensor) -> torch.Tensor:
+        latent_states = self.get_latent_states(current_sample_encodings, self.dropout(example_encodings)) # (N x L x H)
+        return self.value_fn_estimator(latent_states).squeeze()
 
     def forward(self, current_sample_encodings: torch.Tensor, example_encodings: torch.Tensor,
                 policy_example_indices: torch.Tensor, all_example_encodings: torch.Tensor,
                 **kwargs):
         # Get latent states, method depends on model type
         latent_states = self.get_latent_states(current_sample_encodings, self.dropout(example_encodings)) # (N x L x H)
+        latent_states = latent_states[:, :-1] # Not using representation of terminal state
 
         # Get query vectors (first half of bilinear)
         query_vectors = torch.matmul(latent_states, self.bilinear).view(-1, self.emb_size) # (N * L x E)

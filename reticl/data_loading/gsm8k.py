@@ -17,10 +17,14 @@ def gsm8k_get_data(split: str, options: TrainOptions):
     train_data, val_data = all_train_data[:-1000], all_train_data[-1000:]
     if split == "train":
         # Get training samples and corpus from train set
-        train_size = options.train_size or len(train_data)
-        corpus_size = options.corpus_size or len(train_data) - train_size
-        data = train_data[:train_size]
-        corpus = train_data[train_size : train_size + corpus_size]
+        if not options.train_size and not options.corpus_size:
+            data = train_data
+            corpus = None
+        else:
+            train_size = options.train_size or len(train_data) - options.corpus_size
+            corpus_size = options.corpus_size or len(train_data) - train_size
+            data = train_data[:train_size]
+            corpus = train_data[train_size : train_size + corpus_size]
     else:
         # Get evaluation samples from split and corpus from train set
         if split == "dev":

@@ -19,8 +19,5 @@ class RetICLInd(RetICLBase):
         batch_size, num_examples = example_encodings.shape[:2]
         # Independent model has same latent state for all examples
         h_0 = self.h_0_transform(current_sample_encodings) # (N x H)
-        latent_states = h_0.repeat(1, num_examples).view(batch_size, num_examples, -1) # (N x L x H)
+        latent_states = h_0.repeat(1, num_examples + 1).view(batch_size, num_examples + 1, -1) # (N x L x H)
         return latent_states
-
-    def get_last_latent_state(self, current_sample_encoding: torch.Tensor, example_encodings: torch.Tensor):
-        return self.h_0_transform(current_sample_encoding)

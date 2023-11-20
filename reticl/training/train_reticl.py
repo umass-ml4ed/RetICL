@@ -18,7 +18,10 @@ from reticl.utils import TrainOptions, device, is_pg
 
 def get_predictions(batch: CollatedBatch, dataset_config: DatasetConfig):
     # Generate predictions given retrieved context and check correctness
-    predictions = Generator.generate(**batch)
+    if batch["outputs"] is not None:
+        predictions = batch["outputs"]
+    else:
+        predictions = Generator.generate(**batch)
     if dataset_config.get("check_correct_batch"):
         correct = dataset_config["check_correct_batch"](
             batch["meta_data"], [pred["text"] for pred in predictions])
@@ -88,7 +91,7 @@ def get_optim(models: List[Retriever], options: TrainOptions, checkpoint = None)
     encoder_params = [param for name, param in all_named_params if "encoder" in name]
     optimizer = torch.optim.AdamW([
         {"params": retriever_params},
-        {"params": encoder_params, "lr": options.encoder_lr}
+        {"params": encoder_params, "lr": options.encoder_lr or options.lr}
     ], lr=options.lr, weight_decay=options.wd)
     if checkpoint is not None:
         optimizer.load_state_dict(checkpoint)
@@ -109,6 +112,7 @@ def polyak_update(source: torch.nn.Module, target: torch.nn.Module, tau: float):
 
 def train_reticl(dataset_config: DatasetConfig, train_split: str, dev_split: str, options_dict: dict):
     options = TrainOptions(options_dict)
+    assert(options.model_name)
     if options.wandb:
         run = wandb.init(project="reticl", config=options.as_dict())
     else:
@@ -129,6 +133,8 @@ def train_reticl(dataset_config: DatasetConfig, train_split: str, dev_split: str
     else:
         retriever = retriever_model(options)
         best_model = retriever_model(options)
+    if options.pt_model_name:
+        retriever.load_state_dict(torch.load(f"{options.pt_model_name}.pt", map_location=device))
     if checkpoint:
         retriever.load_state_dict(checkpoint["retriever"])
     retriever.train()
@@ -217,6 +223,7 @@ def train_reticl(dataset_config: DatasetConfig, train_split: str, dev_split: str
             print("Entropy Coefficient:", e_coef)
 
         # Sample batch from dataset - example retrieval is also done here (__getitem__ in RetICLDataset)
+        retriever.train()
         for raw_batch in tqdm(data_loader):
             batch = collator(raw_batch)
             batch_size, max_num_examples = batch["example_encodings"].shape[:2]
@@ -304,7 +311,6 @@ def train_reticl(dataset_config: DatasetConfig, train_split: str, dev_split: str
                 vf_loss = torch.nn.MSELoss(reduction="none")(value_estimates, returns)
 
                 # Get final loss
-                # TODO: should add supplemental losses after taking mean?
                 if options.sep_val_model:
                     loss = clip_loss
                     vf_loss.mean().backward()
@@ -395,9 +401,9 @@ def train_reticl(dataset_config: DatasetConfig, train_split: str, dev_split: str
             if options.rl_algo != RLAlgorithm.DSAC.value:
                 # Maximize entropy - encourages exploration by flattening action distribution
                 entropy = get_entropy(activations)
-                loss = loss - e_coef * entropy
                 loss[loss_mask] = 0
-                loss.mean().backward()
+                loss = loss.mean() - e_coef * entropy
+                loss.backward()
                 torch.nn.utils.clip_grad_norm_(retriever_params, options.grad_clip)
                 optimizer.step()
                 optimizer.zero_grad()
@@ -425,6 +431,7 @@ def train_reticl(dataset_config: DatasetConfig, train_split: str, dev_split: str
             val_reward = 0
             val_correct = 0
             val_entropy = None
+            retriever.eval()
             for batch in tqdm(val_loader):
                 for example_idx in batch["policy_example_indices"].view(-1):
                     val_example_set.add(example_idx.item())

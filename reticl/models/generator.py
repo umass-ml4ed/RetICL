@@ -74,7 +74,11 @@ class Generator:
         if cls._model_name != "gpt3":
             print("Loading generator model...")
             start_time = time.time()
-            cls._model = AutoModelForCausalLM.from_pretrained(cls._model_name, torch_dtype=torch.float16, low_cpu_mem_usage=True)
+            cls._model = AutoModelForCausalLM.from_pretrained(
+                cls._model_name,
+                torch_dtype=torch.float16,
+                device_map="auto"
+            )
             if "gpt-j" in cls._model_name:
                 cls._max_tokens = cls._model.config.n_positions
             else:
@@ -86,12 +90,14 @@ class Generator:
                     model=cls._model,
                     mp_size=1,
                     dtype=torch.float16,
-                    replace_with_kernel_inject=True,
+                    replace_with_kernel_inject=False,
                     max_out_tokens=cls._max_tokens
                 )
-            cls._model = cls._model.to(device)
             cls._tokenizer = AutoTokenizer.from_pretrained(cls._model_name)
-            cls._tokenizer.pad_token = cls._tokenizer.eos_token
+            if "llama" in cls._model_name:
+                cls._tokenizer.pad_token = cls._tokenizer.bos_token
+            else:
+                cls._tokenizer.pad_token = cls._tokenizer.eos_token
             print(f"Generator model loaded ({time.time() - start_time:.2f}s)")
 
     @classmethod
@@ -168,10 +174,14 @@ class Generator:
         if cls._model_name == "gpt3":
             uncached_prompts = [prompt for prompt in prompts if prompt not in cls._cache or isinstance(cls._cache[prompt], str)]
             if uncached_prompts:
-                results = gpt3_completion_with_batching(uncached_prompts, cls._gen_batch_size, cls._gpt3_model_name, cls.options.max_gen_tokens, logprobs=1)
+                use_chat = cls._gpt3_model_name in ("gpt-3.5-turbo", "gpt-4")
+                if use_chat:
+                    results = gpt3_completion_parallel(uncached_prompts, 1, cls._gpt3_model_name, cls.options.max_gen_tokens)
+                else:
+                    results = gpt3_completion_with_batching(uncached_prompts, cls._gen_batch_size, cls._gpt3_model_name, cls.options.max_gen_tokens, logprobs=1)
                 assert len(uncached_prompts) == len(results)
                 for prompt, result in zip(uncached_prompts, results):
-                    if "gpt-3.5-turbo" in cls._gpt3_model_name:
+                    if use_chat:
                         cls._cache[prompt] = {
                             "text": result["message"]["content"],
                             "nll": None
@@ -185,62 +195,37 @@ class Generator:
             torch.use_deterministic_algorithms(False) # Don't use deterministic algorithms to speed up generation
             with torch.no_grad():
                 cls._tokenizer.padding_side = "left"
-                if cls._use_ds:
-                    uncached_prompts = [prompt for prompt in prompts if prompt not in cls._cache or isinstance(cls._cache[prompt], str)]
-                    if uncached_prompts:
-                        for start_idx in range(0, len(uncached_prompts), cls._gen_batch_size):
-                            batch = uncached_prompts[start_idx : start_idx + cls._gen_batch_size]
-                            inputs = cls._tokenizer(batch, return_tensors="pt", padding=True).to(device)
-                            overflow = inputs.input_ids.shape[1] + cls.options.max_gen_tokens - cls._max_tokens
-                            if overflow > 0:
-                                # Remove tokens from beginning if prompt is too long
-                                # inputs.input_ids = inputs.input_ids[:, overflow:]
-                                # inputs.attention_mask = inputs.attention_mask[:, overflow:]
-                                print("Too long!")
-                            outputs = cls._model_ds.generate(
-                                **inputs,
-                                pad_token_id=cls._tokenizer.eos_token_id,
-                                stopping_criteria=[NLStoppingCriteria(cls._tokenizer, inputs.input_ids.shape[1])],
-                                max_new_tokens=cls.options.max_gen_tokens,
-                                do_sample=False,
-                            )
-                            outputs = outputs[:, inputs.input_ids.shape[1]:] # Just return generated portion
-                            preds = cls._tokenizer.batch_decode(outputs, skip_special_tokens=True)
-                            for prompt, pred in zip(batch, preds):
-                                first_nl = pred.find("\n\n")
-                                if first_nl != -1:
-                                    pred = pred[:first_nl]
-                                cls._cache[prompt] = {
-                                    "text": pred,
-                                    "nll": None
-                                }
-                else:
-                    for prompt in prompts:
-                        if prompt in cls._cache:
-                            continue
-                        input_ids = cls._tokenizer(prompt, return_tensors="pt").input_ids.to(device)
-                        overflow = input_ids.shape[1] + cls.options.max_gen_tokens - cls._max_tokens
+                uncached_prompts = [prompt for prompt in prompts if prompt not in cls._cache or isinstance(cls._cache[prompt], str)]
+                if uncached_prompts:
+                    for start_idx in range(0, len(uncached_prompts), cls._gen_batch_size):
+                        batch = uncached_prompts[start_idx : start_idx + cls._gen_batch_size]
+                        inputs = cls._tokenizer(batch, return_tensors="pt", padding=True).to(device)
+                        overflow = inputs.input_ids.shape[1] + cls.options.max_gen_tokens - cls._max_tokens
                         if overflow > 0:
                             # Remove tokens from beginning if prompt is too long
                             # inputs.input_ids = inputs.input_ids[:, overflow:]
                             # inputs.attention_mask = inputs.attention_mask[:, overflow:]
                             print("Too long!")
-                        output = cls._model.generate(
-                            input_ids,
+                        model = cls._model_ds if cls._use_ds else cls._model
+                        outputs = model.generate(
+                            **inputs,
                             pad_token_id=cls._tokenizer.eos_token_id,
-                            stopping_criteria=[NLStoppingCriteria(cls._tokenizer, input_ids.shape[1])],
+                            stopping_criteria=[NLStoppingCriteria(cls._tokenizer, inputs.input_ids.shape[1])],
                             max_new_tokens=cls.options.max_gen_tokens,
                             do_sample=False,
+                            temperature=None,
+                            top_p=None
                         )
-                        output = output[:, input_ids.shape[-1]:] # Just return generated portion
-                        pred = cls._tokenizer.batch_decode(output, skip_special_tokens=True)[0]
-                        first_nl = pred.find("\n\n")
-                        if first_nl != -1:
-                            pred = pred[:first_nl]
-                        cls._cache[prompt] = {
-                            "text": pred,
-                            "nll": None
-                        }
+                        outputs = outputs[:, inputs.input_ids.shape[1]:] # Just return generated portion
+                        preds = cls._tokenizer.batch_decode(outputs, skip_special_tokens=True)
+                        for prompt, pred in zip(batch, preds):
+                            first_nl = pred.find("\n\n")
+                            if first_nl != -1:
+                                pred = pred[:first_nl]
+                            cls._cache[prompt] = {
+                                "text": pred,
+                                "nll": None
+                            }
             torch.use_deterministic_algorithms(cls.options.deterministic, warn_only=True) # Set determinism back
         return [cls._cache[prompt] for prompt in prompts]
 

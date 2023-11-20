@@ -118,10 +118,9 @@ def evaluate_reticl(run, dataset_config: DatasetConfig, retriever: Optional[Retr
                 run.summary["mc_accuracy"] = mc_acc
                 run.summary["free_accuracy"] = free_acc
 
-        generator_model = options.generator_model.replace("/", "-")
-        model_name = options.model_name if options.model_name else\
-            f"{options.sm}_{generator_model}" + (f"_{options.gpt3_model}" if options.generator_model == "gpt3" else "")
-        out_filename = f"results_{options.dataset}_{split}_{model_name}_tex{options.num_examples}_mgt{options.max_gen_tokens}"
+        generator_model = options.gpt3_model if options.generator_model == "gpt3" else options.generator_model.replace("/", "-")
+        model_name = options.model_name if options.model_name else options.sm
+        out_filename = f"results_{options.dataset}_{split}_{model_name}_{generator_model}_tex{options.num_examples}_mgt{options.max_gen_tokens}"
         if options.val_corpus_size:
             out_filename += f"_vcs{options.val_corpus_size}"
         out_filename += ".csv"

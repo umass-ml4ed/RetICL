@@ -12,6 +12,7 @@ import faiss
 from reticl.data_loading.data_types import DataSample, DatasetConfig
 from reticl.models.retriever import Retriever
 from reticl.models.encoder import SBERTEncoder
+from reticl.models.generator import GeneratorResult
 from reticl.constants import SamplingMethod, EncoderModelType
 from reticl.utils import device, TrainOptions
 
@@ -19,6 +20,7 @@ class ICLSample(TypedDict):
     # For evaluation
     prompt: str
     label: str
+    output: Optional[GeneratorResult]
     meta_data: dict
     # For retriever
     current_sample_encoding: torch.Tensor
@@ -31,6 +33,7 @@ class CollatedBatch(TypedDict):
     # For evaluation
     prompts: List[str]
     labels: List[str]
+    outputs: Optional[List[GeneratorResult]]
     meta_data: List[dict]
     # For retriever
     current_sample_encodings: torch.Tensor
@@ -58,6 +61,7 @@ class RetICLDataset(TorchDataset):
             self.corpus = [dataset_config["process_sample"](sample) for sample in corpus]
         else:
             self.corpus = self.data
+        self.prompt_prefix = dataset_config.get("prompt_prefix")
 
         # Compute encodings
         self.trainable_encoder = False
@@ -109,7 +113,6 @@ class RetICLDataset(TorchDataset):
                     return_tensors="pt", padding=True, truncation=True, max_length=512
                 ).to(device)
                 outputs = self.encoder(**inputs).pooler_output
-                # outputs = encoder(**inputs).last_hidden_state[:, 0]
             elif self.options.encoder_model_type == EncoderModelType.GPT2.value:
                 seq_strings = [
                     (sample["encoder_context"] + sample["encoder_label"]) if inc_label else sample["encoder_context"]
@@ -136,7 +139,6 @@ class RetICLDataset(TorchDataset):
 
     def compute_encodings(self, cached_encoding_matrix: torch.Tensor = None):
         print("Encoding samples...")
-
         with torch.no_grad():
             self.batch_encode(self.data, False)
             if cached_encoding_matrix is not None:
@@ -153,7 +155,7 @@ class RetICLDataset(TorchDataset):
 
         # Construct index for sample lookup
         if self.options.sm == SamplingMethod.SIMILARITY.value:
-            encoding_matrix_np = self.encoding_matrix.cpu().numpy()
+            encoding_matrix_np = self.encoding_matrix.detach().cpu().numpy()
             self.index = faiss.IndexFlatL2(self.emb_size)
             self.index.add(encoding_matrix_np)
 
@@ -176,7 +178,6 @@ class RetICLDataset(TorchDataset):
         if corp_eq_data:
             top_neighbor_indices = top_neighbor_indices[top_neighbor_indices != index]
         top_neighbor_indices = top_neighbor_indices[:self.options.num_examples]
-        # Flip order to handle recency bias
         top_neighbor_indices = np.flip(top_neighbor_indices).copy()
         return top_neighbor_indices, None
 
@@ -219,7 +220,6 @@ class RetICLDataset(TorchDataset):
         return example_idxs, example_encodings
 
     def get_beam_search_examples(self, index: int, cur_sample: DataSample, corp_eq_data: bool):
-        beam_width = 1
         beams = [{
             "example_idxs": [],
             "used_idxs": [index] if corp_eq_data else [],
@@ -229,14 +229,24 @@ class RetICLDataset(TorchDataset):
         while len(beams[0]["example_idxs"]) < self.options.num_examples:
             beam_cands = []
             for beam in beams:
-                qv = self.retriever.get_query_vector(
-                    current_sample_encoding=cur_sample["context_encoding"],
-                    example_encodings=beam["example_encodings"],
-                )
-                activations = torch.matmul(qv, self.encoding_matrix.T)
+                if self.options.sm == SamplingMethod.VF.value:
+                    # TODO: if this is really slow then can cache previous states and pass to initial hidden state
+                    activations = self.retriever.get_last_vfe(
+                        current_sample_encodings=cur_sample["context_encoding"].repeat(self.encoding_matrix.shape[0], 1),
+                        example_encodings=torch.cat([
+                            beam["example_encodings"].unsqueeze(0).repeat(self.encoding_matrix.shape[0], 1, 1),
+                            self.encoding_matrix.unsqueeze(1)
+                        ], dim=1),
+                    )
+                else:
+                    qv = self.retriever.get_query_vector(
+                        current_sample_encoding=cur_sample["context_encoding"],
+                        example_encodings=beam["example_encodings"],
+                    )
+                    activations = torch.matmul(qv, self.encoding_matrix.T)
                 activations[beam["used_idxs"]] = -torch.inf
                 pi_cur = torch.softmax(activations, dim=0)
-                _, example_idx_cands = torch.topk(activations, beam_width)
+                _, example_idx_cands = torch.topk(activations, self.options.beam_width)
                 for example_idx in example_idx_cands:
                     new_example_encodings = torch.cat([
                         beam["example_encodings"],
@@ -246,9 +256,9 @@ class RetICLDataset(TorchDataset):
                         "example_idxs": beam["example_idxs"] + [example_idx.item()],
                         "used_idxs": beam["used_idxs"] + [example_idx.item()],
                         "example_encodings": new_example_encodings,
-                        "prob": beam["prob"] * pi_cur[example_idx].item()
+                        "prob": pi_cur[example_idx].item() * (1 if self.options.sm == SamplingMethod.VF.value else beam["prob"])
                     })
-            beams = sorted(beam_cands, key=lambda beam: -beam["prob"])[:beam_width]
+            beams = sorted(beam_cands, key=lambda beam: -beam["prob"])[:self.options.beam_width]
         top_beam = sorted(beam_cands, key=lambda beam: -beam["prob"])[0]
         return top_beam["example_idxs"], top_beam["example_encodings"]
 
@@ -282,9 +292,12 @@ class RetICLDataset(TorchDataset):
                 else:
                     example_idxs, example_encodings = self.get_policy_sampled_examples(index, cur_sample, corp_eq_data)
 
-        # Construct prompt
+        # Construct prompt - reverse order to account for recency bias
         examples = [self.corpus[example_idx] for example_idx in example_idxs]
-        prompt = "\n\n".join([example["lm_context"] + example["lm_label"] for example in examples])
+        prompt = ""
+        if self.prompt_prefix:
+            prompt += self.prompt_prefix + "\n\n"
+        prompt += "\n\n".join([example["lm_context"] + example["lm_label"] for example in examples])
         prompt += "\n\n" + cur_sample["lm_context"]
 
         # Set retriever back to training mode if necessary
@@ -312,6 +325,7 @@ class Collator():
         return {
             "prompts": [sample["prompt"] for sample in batch],
             "labels": [sample["label"] for sample in batch],
+            "outputs": [sample["output"] for sample in batch] if batch[0].get("output") else None,
             "meta_data": [sample["meta_data"] for sample in batch],
             "current_sample_encodings": torch.stack(
                 [sample["current_sample_encoding"] for sample in batch]

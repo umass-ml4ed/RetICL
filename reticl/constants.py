@@ -33,6 +33,7 @@ class SamplingMethod(Enum):
     SOFTMAX = "softmax"
     EXHAUSTIVE = "exhaustive"
     COMPLEX = "complex"
+    VF = "vf"
 
 class Reward(Enum):
     PPL = "ppl"

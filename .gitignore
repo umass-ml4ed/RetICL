@@ -4,6 +4,7 @@ __pycache__
 *.png
 
 generator_cache*
+reticl_pretrain_data*
 
 grade-school-math
 MATH 2

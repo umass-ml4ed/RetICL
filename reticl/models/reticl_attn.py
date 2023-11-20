@@ -24,11 +24,9 @@ class RetICLAttn(RetICLBase):
             orthogonal_init_(self.example_transform)
             orthogonal_init_(self.attn_activation)
 
-    def _get_latent_states(self, current_sample_encodings: torch.Tensor, example_encodings: torch.Tensor, incl_last: bool):
+    def _get_latent_states(self, current_sample_encodings: torch.Tensor, example_encodings: torch.Tensor):
         # Get sub-latent states from current sample and example encodings
         h_0 = self.h_0_transform(current_sample_encodings) # (N x H)
-        if not incl_last:
-            example_encodings = example_encodings[:, :-1]
         example_states = self.example_transform(example_encodings)
         sub_latent_states = torch.cat([h_0.unsqueeze(1), example_states], dim=1) # (N x L x H)
         # Get final latent states from attention weighted sums, mask so only previous states are attended to
@@ -42,8 +40,4 @@ class RetICLAttn(RetICLBase):
         return latent_states
 
     def get_latent_states(self, current_sample_encodings: torch.Tensor, example_encodings: torch.Tensor, **kwargs):
-        return self._get_latent_states(current_sample_encodings, example_encodings, False)
-
-    def get_last_latent_state(self, current_sample_encoding: torch.Tensor, example_encodings: torch.Tensor):
-        latent_states = self._get_latent_states(current_sample_encoding.unsqueeze(0), example_encodings.unsqueeze(0), True)
-        return latent_states[0, -1]
+        return self._get_latent_states(current_sample_encodings, example_encodings)

@@ -27,6 +27,7 @@ class TrainOptions:
             raise Exception("RL algorithm not used with random or similarity sampling!")
         self.model_type: str = options_dict.get("model_type", ModelType.LSTM.value)
         self.model_name: Optional[str] = options_dict.get("model_name", None)
+        self.pt_model_name: Optional[str] = options_dict.get("pt_model_name", None)
         self.generator_model: str = options_dict.get("generator_model", "gpt3")
         self.gpt3_model: str = options_dict.get("gpt3_model", "code-davinci-002")
         self.gen_batch_size: int = options_dict.get("gen_batch_size", 0)
@@ -35,9 +36,9 @@ class TrainOptions:
         self.encoder_h: int = options_dict.get("encoder_h", 0)
         self.pool: str = options_dict.get("pool", Pooling.MEAN.value)
         self.ft_encoder: bool = options_dict.get("ft_encoder", False)
-        self.encoder_lr: float = options_dict.get("encoder_lr", 1e-3)
+        self.encoder_lr: Optional[float] = options_dict.get("encoder_lr", None)
         self.soft_prompt_len: int = options_dict.get("soft_prompt_len", 0)
-        self.train_size: int = options_dict.get("train_size", 1000)
+        self.train_size: int = options_dict.get("train_size", 0)
         self.corpus_size: int = options_dict.get("corpus_size", 0)
         self.val_size: int = options_dict.get("val_size", 0)
         self.val_corpus_size: int = options_dict.get("val_corpus_size", 0)
@@ -68,6 +69,8 @@ class TrainOptions:
         self.e_coef: float = options_dict.get("e_coef", 0.0)
         self.sep_val_model: bool = options_dict.get("sep_val_model", False)
         self.max_gen_tokens: int = options_dict.get("max_gen_tokens", DEFAULT_MAX_GEN_TOKENS.get(self.dataset, 400))
+        self.beam_width: int = options_dict.get("beam_width", 1)
+        self.pt_sample_freq: int = options_dict.get("pt_sample_freq", 0)
         self.deterministic: bool = options_dict.get("deterministic", True)
 
     def as_dict(self):

@@ -63,7 +63,7 @@ def gpt3_completion(prompts: List[str], model="code-davinci-002", max_tokens=400
 
     # Send request
     try:
-        if "gpt-3.5-turbo" in model:
+        if model in ("gpt-3.5-turbo", "gpt-4"):
             results = []
             for prompt in prompts:
                 response = openai.ChatCompletion.create(
@@ -71,10 +71,7 @@ def gpt3_completion(prompts: List[str], model="code-davinci-002", max_tokens=400
                     messages=[
                         {
                             "role": "user",
-                            "content": "You are a few-shot completion model. "
-                                "You will be given several example problems with solutions, "
-                                "and then a new problem that you have to write the solution for. "
-                                "Match the formatting of the examples as closely as possible.\n\n" + prompt
+                            "content": prompt
                         }
                     ],
                     temperature=0,
@@ -82,6 +79,7 @@ def gpt3_completion(prompts: List[str], model="code-davinci-002", max_tokens=400
                     top_p=1,
                     frequency_penalty=0.0,
                     presence_penalty=0.0,
+                    request_timeout=45
                 )
                 results.append(response["choices"][0])
         else:

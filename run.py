@@ -2,6 +2,7 @@ import argparse
 import torch
 
 from reticl.training.train_reticl import train_reticl
+from reticl.training.pretrain_reticl import pretrain_reticl, collect_samples
 from reticl.training.train_gpt2_encoder import finetune_gpt2
 from reticl.training.train_bert_encoder import finetune_bert
 from reticl.evaluate import evaluate, error_analysis
@@ -46,6 +47,8 @@ def main():
     # Modes
     parser.add_argument("--train", action="store_true", help="Train RetICL retriever for sample lookup")
     parser.add_argument("--eval", type=str, help="Evaluate downstream performance, provide dataset split as argument")
+    parser.add_argument("--create_pretrain_dataset", type=str, help="Create randomly sampled pre-training dataset, provide dataset split as argument")
+    parser.add_argument("--pretrain", action="store_true", help="Pre-train model on pre-training dataset")
     parser.add_argument("--finetune_gpt2", action="store_true", help="Fine-tune GPT-2 encoder on dataset")
     parser.add_argument("--finetune_bert", action="store_true", help="Fine-tune BERT encoder on dataset")
     parser.add_argument("--error_analysis", nargs=3, help="Perform error analysis on result files; provide two .csv result files")
@@ -56,6 +59,7 @@ def main():
     parser.add_argument("--sm", type=str, choices=[sm.value for sm in SamplingMethod], help="Sampling method for example retrieval")
     parser.add_argument("--model_type", type=str, choices=[mt.value for mt in ModelType], help="Type of RetICL model to use")
     parser.add_argument("--model_name", type=str, help="Name of RetICL model")
+    parser.add_argument("--pt_model_name", type=str, help="Pre-trained model to initialize with")
     parser.add_argument("--generator_model", type=str, help="Name of pre-trained model for text generation. Set to 'gpt3' to use OpenAI, otherwise model is loaded from huggingface.", default="gpt3")
     parser.add_argument("--gpt3_model", type=str, help="Specific model when using OpenAI for generation", default="code-davinci-002")
     parser.add_argument("--gen_batch_size", type=int, help="Batch size for generator")
@@ -97,6 +101,8 @@ def main():
     parser.add_argument("--e_coef", type=float, help="Coefficient for entropy loss")
     parser.add_argument("--sep_val_model", type=bool_type, help="Separate value model from policy model")
     parser.add_argument("--max_gen_tokens", type=int, help="Maximum number of tokens to generate")
+    parser.add_argument("--beam_width", type=int, help="Beam search width for inference time policy example retrieval")
+    parser.add_argument("--pt_sample_freq", type=int, help="Number of prompts to collect per sample in pretraining data")
     parser.add_argument("--rseed", type=int, help="Random seed", default=221)
     parser.add_argument("--deterministic", type=bool_type, help="Use deterministic algorithms", default=True)
 
@@ -107,12 +113,16 @@ def main():
     torch.use_deterministic_algorithms(args.deterministic, warn_only=True)
 
     dataset_config = get_dataset_config(arg_dict)
-    if args.train or args.eval:
+    if args.train or args.eval or args.create_pretrain_dataset:
         with GeneratorCM(arg_dict): # Load/save generator prediction cache on program start/exit
             if args.train:
                 train_reticl(dataset_config, "train", "dev", arg_dict)
             if args.eval:
                 evaluate(dataset_config, args.eval, arg_dict)
+            if args.create_pretrain_dataset:
+                collect_samples(args.create_pretrain_dataset, dataset_config, arg_dict)
+    if args.pretrain:
+        pretrain_reticl(dataset_config, arg_dict)
     if args.finetune_gpt2:
         finetune_gpt2(dataset_config, arg_dict)
     if args.finetune_bert:

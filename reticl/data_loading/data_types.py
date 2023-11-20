@@ -24,3 +24,4 @@ class DatasetConfig(TypedDict):
     check_correct: Optional[CheckCorrectFunction]
     check_correct_batch: Optional[CheckCorrectBatchFunction]
     complexity_metric: Optional[ComplexityMetric]
+    prompt_prefix: Optional[str]
