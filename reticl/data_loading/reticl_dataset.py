@@ -39,7 +39,7 @@ class CollatedBatch(TypedDict):
     current_sample_encodings: torch.Tensor
     example_encodings: torch.Tensor
     policy_example_indices: torch.Tensor
-    num_examples: torch.Tensor
+    seq_len: torch.Tensor
     # For PG version of model
     all_example_encodings: torch.Tensor
 
@@ -84,6 +84,9 @@ class RetICLDataset(TorchDataset):
                 else:
                     self.encoder = SentenceTransformer(self.options.encoder_model or "all-distilroberta-v1")
                 self.compute_encodings(cached_encoding_matrix=cached_encoding_matrix)
+
+        self.eos_idx = len(self.corpus)
+
         if options.sm == SamplingMethod.COMPLEX.value:
             complexity_metric = dataset_config.get("complexity_metric", lambda sample: sample["lm_label"].count("\n"))
             corpus_complexity = [-complexity_metric(sample) for sample in self.corpus]
@@ -188,20 +191,19 @@ class RetICLDataset(TorchDataset):
             used_idxs.append(index)
         example_encodings = torch.empty((0, self.emb_size)).to(device)
         random_example_idxs, _ = self.get_random_examples(index, corp_eq_data)
-        while len(example_idxs) < self.options.num_examples:
-            qv = self.retriever.get_query_vector(
+        while not example_idxs or example_idxs[-1] != self.eos_idx:
+            activations = self.retriever.get_activations(
                 current_sample_encoding=cur_sample["context_encoding"],
                 example_encodings=example_encodings,
+                all_example_encodings=self.encoding_matrix,
+                used_idxs=used_idxs
             )
-            activations = torch.matmul(qv, self.encoding_matrix.T)
-            activations[used_idxs] = -torch.inf
-            if self.greedy:
-                torch.argmax(activations).item()
-            elif self.options.sm == SamplingMethod.EPSILON_GREEDY.value:
+            if self.options.sm == SamplingMethod.EPSILON_GREEDY.value:
                 # If roll is above epsilon then sample from retriever, otherwise pick random sample
                 if random.random() > self.epsilon:
                     example_idx = torch.argmax(activations).item()
                 else:
+                    # TODO: should use activations to account for used_idxs and eos
                     example_idx = random_example_idxs[0]
             elif self.options.sm == SamplingMethod.SOFTMAX.value:
                 # Sample from policy at current state
@@ -215,7 +217,10 @@ class RetICLDataset(TorchDataset):
             used_idxs.append(example_idx)
             random_example_idxs = random_example_idxs[random_example_idxs != example_idx]
             example_idxs.append(example_idx)
-            example_encoding = self.corpus[example_idx]["full_encoding"]
+            if example_idx == self.eos_idx:
+                example_encoding = torch.zeros((self.emb_size,))
+            else:
+                example_encoding = self.corpus[example_idx]["full_encoding"]
             example_encodings = torch.cat([example_encodings, example_encoding.unsqueeze(0).to(device)], dim=0)
         return example_idxs, example_encodings
 
@@ -226,9 +231,12 @@ class RetICLDataset(TorchDataset):
             "example_encodings": torch.empty((0, self.emb_size)).to(device),
             "prob": 1.0
         }]
-        while len(beams[0]["example_idxs"]) < self.options.num_examples:
+        while not all(beam["example_idxs"] and beam["example_idxs"][-1] == self.eos_idx for beam in beams):
             beam_cands = []
             for beam in beams:
+                if beam["example_idxs"] and beam["example_idxs"][-1] == self.eos_idx:
+                    beam_cands.append(beam)
+                    continue
                 if self.options.sm == SamplingMethod.VF.value:
                     # TODO: if this is really slow then can cache previous states and pass to initial hidden state
                     activations = self.retriever.get_last_vfe(
@@ -238,23 +246,32 @@ class RetICLDataset(TorchDataset):
                             self.encoding_matrix.unsqueeze(1)
                         ], dim=1),
                     )
+                    activations[beam["used_idxs"]] = -torch.inf
                 else:
-                    qv = self.retriever.get_query_vector(
+                    activations = self.retriever.get_activations(
                         current_sample_encoding=cur_sample["context_encoding"],
                         example_encodings=beam["example_encodings"],
+                        all_example_encodings=self.encoding_matrix,
+                        used_idxs=beam["used_idxs"]
                     )
-                    activations = torch.matmul(qv, self.encoding_matrix.T)
-                activations[beam["used_idxs"]] = -torch.inf
                 pi_cur = torch.softmax(activations, dim=0)
-                _, example_idx_cands = torch.topk(activations, self.options.beam_width)
+                if len(beam["example_idxs"]) < self.options.num_examples:
+                    example_idx_cands = torch.topk(activations, self.options.beam_width)[1].tolist()
+                else:
+                    example_idx_cands = [self.eos_idx]
                 for example_idx in example_idx_cands:
+                    if example_idx == self.eos_idx:
+                        # TODO: if we want to do early stopping with baseline, need to use learnable eos token embedding
+                        example_encoding = torch.zeros((self.emb_size,))
+                    else:
+                        example_encoding = self.corpus[example_idx]["full_encoding"]
                     new_example_encodings = torch.cat([
                         beam["example_encodings"],
-                        self.corpus[example_idx]["full_encoding"].unsqueeze(0).to(device)
+                        example_encoding.unsqueeze(0).to(device)
                     ], dim=0)
                     beam_cands.append({
-                        "example_idxs": beam["example_idxs"] + [example_idx.item()],
-                        "used_idxs": beam["used_idxs"] + [example_idx.item()],
+                        "example_idxs": beam["example_idxs"] + [example_idx],
+                        "used_idxs": beam["used_idxs"] + [example_idx],
                         "example_encodings": new_example_encodings,
                         "prob": pi_cur[example_idx].item() * (1 if self.options.sm == SamplingMethod.VF.value else beam["prob"])
                     })
@@ -292,8 +309,8 @@ class RetICLDataset(TorchDataset):
                 else:
                     example_idxs, example_encodings = self.get_policy_sampled_examples(index, cur_sample, corp_eq_data)
 
-        # Construct prompt - reverse order to account for recency bias
-        examples = [self.corpus[example_idx] for example_idx in example_idxs]
+        # Construct prompt
+        examples = [self.corpus[example_idx] for example_idx in example_idxs if example_idx != self.eos_idx]
         prompt = ""
         if self.prompt_prefix:
             prompt += self.prompt_prefix + "\n\n"
@@ -321,6 +338,9 @@ class RetICLDataset(TorchDataset):
         return len(self.data)
 
 class Collator():
+    def __init__(self, eos_idx: int):
+        self.eos_idx = eos_idx
+
     def __call__(self, batch: List[ICLSample]) -> CollatedBatch:
         return {
             "prompts": [sample["prompt"] for sample in batch],
@@ -334,12 +354,13 @@ class Collator():
                 [sample["example_encodings"] for sample in batch],
                 batch_first=True
             ).to(device) if batch[0]["example_encodings"] is not None else None,
-            "num_examples": torch.tensor([
+            "seq_len": torch.tensor([
                 len(sample["example_encodings"]) for sample in batch
             ]) if batch[0]["example_encodings"] is not None else None,
             "policy_example_indices": pad_sequence(
                 [torch.LongTensor(sample["policy_example_indices"]) for sample in batch],
-                batch_first=True
+                batch_first=True,
+                padding_value=self.eos_idx
             ).to(device),
             "all_example_encodings": batch[0]["all_example_encodings"],
         }

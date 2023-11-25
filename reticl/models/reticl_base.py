@@ -1,10 +1,12 @@
 from abc import abstractmethod
+from typing import List
 import torch
 from torch import nn
 
 from reticl.models.encoder import SBERTEncoder
 from reticl.utils import TrainOptions, is_pg, orthogonal_init_
 from reticl.constants import MODEL_TO_EMB_SIZE, Init, Pooling
+from reticl.utils import device
 
 class RetICLBase(nn.Module):
     def __init__(self, options: TrainOptions, use_bias: bool, mask_prev_examples: bool, num_critics: int):
@@ -16,6 +18,10 @@ class RetICLBase(nn.Module):
         self.dropout = nn.Dropout(options.dropout)
         self.bilinear = nn.Parameter(torch.empty((options.hidden_size, self.emb_size)))
         self.bias = nn.Parameter(torch.zeros((1)))
+        if options.early_stopping:
+            self.early_stop_proj = nn.Linear(options.hidden_size, 1, bias=True)
+            # Ensure that at initialization early stopping action has high probability relative to all examples
+            nn.init.constant_(self.early_stop_proj.bias, options.corpus_size * .02)
         self.num_critics = num_critics
         if num_critics == 0:
             self.value_fn_estimator = nn.Linear(options.hidden_size, 1)
@@ -28,6 +34,8 @@ class RetICLBase(nn.Module):
             ])
         if options.init == Init.ORTHOGONAL.value:
             nn.init.orthogonal_(self.bilinear, gain=1.0)
+            if options.early_stopping:
+                nn.init.orthogonal_(self.early_stop_proj.weight, gain=1.0)
             if num_critics == 0:
                 orthogonal_init_(self.value_fn_estimator, gain=1.0)
             else:
@@ -71,12 +79,28 @@ class RetICLBase(nn.Module):
         latent_states = self.get_latent_states(current_sample_encoding.unsqueeze(0), example_encodings.unsqueeze(0))
         return latent_states[0, -1]
 
-    def get_query_vector(self, current_sample_encoding: torch.Tensor, example_encodings: torch.Tensor) -> torch.Tensor:
-        return torch.matmul(self.get_last_latent_state(current_sample_encoding, example_encodings), self.bilinear)
+    def get_activations(self, current_sample_encoding: torch.Tensor, example_encodings: torch.Tensor,
+                        all_example_encodings: torch.Tensor, used_idxs: List[int]) -> torch.Tensor:
+        if example_encodings.shape[0] == self.options.num_examples:
+            # Only allow eos when max num examples used
+            activations = torch.full((all_example_encodings.shape[0],), -torch.inf, device=device)
+            eos_activation = torch.tensor([0], device=device)
+        else:
+            last_latent_state = self.get_last_latent_state(current_sample_encoding, example_encodings)
+            query_vector = torch.matmul(last_latent_state, self.bilinear)
+            activations = torch.matmul(query_vector, all_example_encodings.T)
+            activations[used_idxs] = -torch.inf
+            if example_encodings.shape[0] == 0 or not self.options.early_stopping:
+                # Don't allow eos if no examples chosen or if early stopping not enabled
+                eos_activation = torch.tensor([-torch.inf], device=device)
+            else:
+                eos_activation = self.early_stop_proj(last_latent_state)
+        activations = torch.concat([activations, eos_activation])
+        return activations
 
     def get_last_vfe(self, current_sample_encodings: torch.Tensor, example_encodings: torch.Tensor) -> torch.Tensor:
-        h_t = self.get_last_latent_state(current_sample_encodings, example_encodings)
-        return self.value_fn_estimator(h_t).squeeze()
+        vfe = self.get_vfe(current_sample_encodings, example_encodings)
+        return vfe[:, -1]
 
     def get_vfe(self, current_sample_encodings: torch.Tensor, example_encodings: torch.Tensor) -> torch.Tensor:
         latent_states = self.get_latent_states(current_sample_encodings, self.dropout(example_encodings)) # (N x L x H)
@@ -84,41 +108,58 @@ class RetICLBase(nn.Module):
 
     def forward(self, current_sample_encodings: torch.Tensor, example_encodings: torch.Tensor,
                 policy_example_indices: torch.Tensor, all_example_encodings: torch.Tensor,
-                **kwargs):
+                seq_len: torch.Tensor, **kwargs):
+        batch_size, max_seq_len = example_encodings.shape[:2]
+
         # Get latent states, method depends on model type
         latent_states = self.get_latent_states(current_sample_encodings, self.dropout(example_encodings)) # (N x L x H)
         latent_states = latent_states[:, :-1] # Not using representation of terminal state
 
         # Get query vectors (first half of bilinear)
-        query_vectors = torch.matmul(latent_states, self.bilinear).view(-1, self.emb_size) # (N * L x E)
+        query_vectors = torch.matmul(latent_states, self.bilinear) # (N x L x E)
 
         # Compute activations
         if is_pg(self.options):
             # Compute activations over full corpus
-            batch_size, max_num_examples = example_encodings.shape[:2]
-            activations = torch.matmul(query_vectors, all_example_encodings.T) # (N * L x K)
+            activations = torch.matmul(query_vectors, all_example_encodings.T) # (N x L x K)
             if self.use_bias:
                 activations += self.bias
             # Mask out previously used examples
             if self.mask_prev_examples:
-                for used_example_idx in range(0, max_num_examples - 1):
-                    for next_example_idx in range(used_example_idx + 1, max_num_examples):
-                        activations.view(batch_size, max_num_examples, -1)[
-                            torch.arange(batch_size),
-                            next_example_idx,
-                            policy_example_indices[:, used_example_idx]
-                        ] = -torch.inf
+                for seq_idx in range(batch_size):
+                    for used_example_idx in range(seq_len[seq_idx] - 1):
+                        for next_example_idx in range(used_example_idx + 1, seq_len[seq_idx]):
+                            activations[
+                                seq_idx,
+                                next_example_idx,
+                                policy_example_indices[seq_idx, used_example_idx]
+                            ] = -torch.inf
         else:
             # Single activation per example - complete bilinear transformation
             example_encodings = example_encodings.view(-1, self.emb_size).unsqueeze(2) # (N * L x E x 1)
-            activations = torch.bmm(query_vectors.unsqueeze(1), example_encodings) + self.bias # (N * L x 1 x 1)
+            activations = torch.bmm(query_vectors.view(-1, self.emb_size).unsqueeze(1), example_encodings) + self.bias # (N * L x 1 x 1)
             activations = activations.squeeze() # (N * L)
+
+        # Add eos action activations
+        if self.options.early_stopping:
+            eos_activations = self.early_stop_proj(latent_states)
+            eos_activations[:, 0] = -torch.inf # Don't allow early stopping as first action
+        else:
+            eos_activations = torch.full((batch_size, max_seq_len, 1), -torch.inf, device=device)
+        # Only allow eos when max num examples used
+        if max_seq_len > self.options.num_examples:
+            activations[:, -1] = -torch.inf # TODO: also consider is_pg = False
+            eos_activations[:, -1] = 0
+
+        activations = torch.concat([activations, eos_activations], dim=2)
+        activations = activations.view(batch_size * max_seq_len, -1)
 
         # Compute value estimates
         if self.num_critics == 0:
             value_estimates = self.value_fn_estimator(latent_states).view(-1) # (N * L)
             return activations, value_estimates
 
+        # TODO: have to handle eos for critics too, probably a less repetitive way of doing it
         critic_outputs = [
             torch.matmul(
                 torch.matmul(latent_states, critic["bilinear"]).view(-1, self.emb_size),

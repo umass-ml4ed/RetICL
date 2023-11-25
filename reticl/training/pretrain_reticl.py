@@ -29,7 +29,7 @@ def collect_samples(split: str, dataset_config: DatasetConfig, options_dict: dic
     dataset = RetICLDataset(dataset_config, split, None, options)
     data_loader = DataLoader(
         dataset,
-        collate_fn=Collator(),
+        collate_fn=Collator(len(dataset.corpus)),
         batch_size=options.batch_size,
         shuffle=False,
         drop_last=False
@@ -56,6 +56,8 @@ def collect_samples(split: str, dataset_config: DatasetConfig, options_dict: dic
         json.dump(results, out_f, indent=2, ensure_ascii=False)
 
 def pretrain_reticl(dataset_config: DatasetConfig, options_dict: dict):
+    # TODO: account for early stopping - load and mix datasets of different lengths, properly assign rewards/returns and compute loss
+
     options = TrainOptions(options_dict)
     assert(options.pt_model_name)
     if options.wandb:
@@ -77,14 +79,14 @@ def pretrain_reticl(dataset_config: DatasetConfig, options_dict: dict):
     data_loader = DataLoader(
         dataset,
         # Actual collate done outside loader so it's easier to collect samples for adding to replay buffer
-        collate_fn=Collator(),
+        collate_fn=Collator(len(dataset.corpus)),
         batch_size=options.batch_size,
         shuffle=True,
         drop_last=False
     )
     val_loader = DataLoader(
         val_set,
-        collate_fn=Collator(),
+        collate_fn=Collator(len(val_set.corpus)),
         batch_size=options.batch_size,
         shuffle=False,
         drop_last=False

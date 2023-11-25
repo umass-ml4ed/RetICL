@@ -41,9 +41,8 @@ def get_rewards(batch: CollatedBatch, dataset_config: DatasetConfig, options: Tr
             return 2 * correct - 1
 
         if options.reward == Reward.EXACT_AND_PPL.value:
-            ppl_weight = .5
             ppl = torch.tensor([-pred["nll"] for pred in predictions]).exp()
-            return 2 * (correct * (1 - ppl_weight) + ppl * ppl_weight) - 1
+            return 2 * (correct * (1 - options.cr_coef) + ppl * options.cr_coef) - 1
 
         if options.reward == Reward.EXACT_AND_BLEU.value:
             # Calculate bleu score on the generated solutions
@@ -59,27 +58,26 @@ def get_rewards(batch: CollatedBatch, dataset_config: DatasetConfig, options: Tr
         nlls = Generator.get_nll(**batch)
         return 2 * torch.exp(-nlls) - 1
 
-def get_td_error(value_estimates: torch.Tensor, rewards: torch.Tensor):
+def get_td_error(value_estimates: torch.Tensor, rewards: torch.Tensor, options: TrainOptions):
     batch_size = rewards.shape[0]
     # Append 0 to value estimates for terminal state
     v_t = F.pad(value_estimates.detach().view(batch_size, -1), (0, 1))
-    # TD error: r_t + v_(t+1) - v_t
-    return (rewards + v_t[:, 1:] - v_t[:, :-1]).view(-1)
+    # TD error: r_t + gamma * v_(t+1) - v_t
+    return (rewards + options.gamma * v_t[:, 1:] - v_t[:, :-1]).view(-1)
 
-def get_gae(value_estimates: torch.Tensor, rewards: torch.Tensor):
-    lam = 0.9
+def get_gae(value_estimates: torch.Tensor, rewards: torch.Tensor, options: TrainOptions):
     batch_size = rewards.shape[0]
-    # GAE: sum_{i=t}^{T} (r_t + v_(i+1) - v_i) * lam^(T-t)
-    gae = get_td_error(value_estimates, rewards).view(batch_size, -1)
+    # GAE: sum_{i=t}^{T} (r_t + gamma * v_(i+1) - v_i) * (gamma * lam)^(T-t)
+    gae = get_td_error(value_estimates, rewards, options).view(batch_size, -1)
     for t in range(gae.shape[1] - 2, -1, -1):
-        gae[:, t] += lam * gae[:, t + 1]
+        gae[:, t] += options.gamma * options.lam * gae[:, t + 1]
     return gae.view(-1)
 
 def get_entropy(activations: torch.Tensor):
     # H_t = -sum(pi(s,.) * log(pi(s,.)))
     # Take average over batch and all time steps
     action_distro = torch.softmax(activations, dim=-1).clip(1e-35)
-    entropy = -torch.sum(action_distro * torch.log(action_distro), dim=-1).mean()
+    entropy = -torch.sum(action_distro * torch.log(action_distro), dim=-1)
     # Normalize by maximum entropy so coefficient is independent of action space size
     return entropy / torch.log(torch.tensor(action_distro.shape[-1]))
 
@@ -185,10 +183,10 @@ def train_reticl(dataset_config: DatasetConfig, train_split: str, dev_split: str
         shuffle=True,
         drop_last=False
     )
-    collator = Collator()
+    collator = Collator(len(dataset.corpus))
     val_loader = DataLoader(
         val_set,
-        collate_fn=Collator(),
+        collate_fn=Collator(len(val_set.corpus)),
         batch_size=options.batch_size,
         shuffle=False,
         drop_last=False
@@ -209,8 +207,8 @@ def train_reticl(dataset_config: DatasetConfig, train_split: str, dev_split: str
         total_reward = 0
         total_loss = 0
         total_vf_loss = 0
+        train_num_examples = 0
         train_example_set = set()
-        val_example_set = set()
 
         # Update exploration parameters
         cur_lr = optimizer.param_groups[0]["lr"]
@@ -226,19 +224,22 @@ def train_reticl(dataset_config: DatasetConfig, train_split: str, dev_split: str
         retriever.train()
         for raw_batch in tqdm(data_loader):
             batch = collator(raw_batch)
-            batch_size, max_num_examples = batch["example_encodings"].shape[:2]
-
-            # Calculate rewards for batch - only applied to final example in sequence
-            rewards = get_rewards(batch, dataset_config, options).to(device) # (N)
-            rewards = F.pad(rewards.unsqueeze(1), (max_num_examples - 1, 0)) # (N x L)
-            total_reward += rewards.detach().cpu().numpy().sum()
+            batch_size, max_seq_len = batch["example_encodings"].shape[:2]
 
             # Keep track of used examples
             for example_idx in batch["policy_example_indices"].view(-1):
                 train_example_set.add(example_idx.item())
+            train_num_examples += (batch["seq_len"] - 1).sum().item()
 
-            # Calculate returns with reverse cumulative sum, assume gamma=1
-            returns = torch.cumsum(rewards.flip(1), dim=1).flip(1).view(-1) # (N * L)
+            # Calculate rewards and returns for batch - rewards given at eos actions
+            final_rewards = get_rewards(batch, dataset_config, options).to(device) # (N)
+            total_reward += final_rewards.detach().cpu().numpy().sum()
+            rewards = torch.zeros((batch_size, max_seq_len), device=device) # (N x L)
+            rewards[torch.arange(batch_size), batch["seq_len"] - 1] = final_rewards
+            returns = rewards.clone()
+            for idx in range(max_seq_len - 2, -1, -1):
+                returns[:, idx] += options.gamma * returns[:, idx + 1]
+            returns = returns.view(-1) # (N * L)
 
             # Off-policy: add to buffer
             if options.rl_algo == RLAlgorithm.DSAC.value:
@@ -257,9 +258,10 @@ def train_reticl(dataset_config: DatasetConfig, train_split: str, dev_split: str
                 else:
                     activations, value_estimates = retriever(**batch)
 
+            # Loss mask - don't compute loss on padding regions
+            loss_mask = torch.arange(max_seq_len).expand(batch_size, -1) >= batch["seq_len"].unsqueeze(1)
+
             # Calculate loss and backprop
-            loss_mask = torch.arange(max_num_examples).expand(batch_size, -1) >= batch["num_examples"].unsqueeze(1)
-            loss_mask = loss_mask.view(-1)
             vf_loss = None
             if options.rl_algo == RLAlgorithm.MCC.value:
                 loss = torch.nn.MSELoss(reduction="none")(activations, returns)
@@ -280,7 +282,7 @@ def train_reticl(dataset_config: DatasetConfig, train_split: str, dev_split: str
                 vf_loss = torch.nn.MSELoss(reduction="none")(value_estimates, returns)
                 loss = pg_loss + options.v_coef * vf_loss
             elif options.rl_algo == RLAlgorithm.AC.value:
-                td_error = get_td_error(value_estimates, rewards)
+                td_error = get_td_error(value_estimates, rewards, options)
                 pg_loss_fn = torch.nn.CrossEntropyLoss(reduction="none")
                 pg_loss = pg_loss_fn(activations, batch["policy_example_indices"].view(-1))
                 pg_loss = pg_loss * td_error
@@ -290,19 +292,19 @@ def train_reticl(dataset_config: DatasetConfig, train_split: str, dev_split: str
             elif options.rl_algo == RLAlgorithm.PPO.value:
                 # Get policy ratio
                 if not previous_model:
-                    ratio = torch.ones((batch_size * max_num_examples)).to(device)
+                    ratio = torch.ones((batch_size * max_seq_len)).to(device)
                     previous_model = retriever_model(options)
                 else:
                     with torch.no_grad():
                         pi_old_activations, _ = previous_model(**batch)
-                    cur_policy_probs = torch.softmax(activations, dim=-1)[torch.arange(batch_size * max_num_examples), batch["policy_example_indices"].view(-1)]
-                    old_policy_probs = torch.softmax(pi_old_activations, dim=-1)[torch.arange(batch_size * max_num_examples), batch["policy_example_indices"].view(-1)]
+                    cur_policy_probs = torch.softmax(activations, dim=-1)[torch.arange(batch_size * max_seq_len), batch["policy_example_indices"].view(-1)]
+                    old_policy_probs = torch.softmax(pi_old_activations, dim=-1)[torch.arange(batch_size * max_seq_len), batch["policy_example_indices"].view(-1)]
                     ratio = cur_policy_probs / old_policy_probs
                 # Copy model for next iteration
                 previous_model.load_state_dict(retriever.state_dict())
 
                 # Get estimated advantage
-                advantage = get_gae(value_estimates, rewards)
+                advantage = get_gae(value_estimates, rewards, options)
 
                 # Get clip loss
                 clip_loss = -torch.min(ratio * advantage, torch.clip(ratio, 1 - options.ppo_eps, 1 + options.ppo_eps) * advantage)
@@ -313,7 +315,9 @@ def train_reticl(dataset_config: DatasetConfig, train_split: str, dev_split: str
                 # Get final loss
                 if options.sep_val_model:
                     loss = clip_loss
-                    vf_loss.mean().backward()
+                    vf_loss[loss_mask.view(-1)] = 0
+                    vf_loss = vf_loss.sum() / (~loss_mask).sum()
+                    vf_loss.backward()
                 else:
                     loss = clip_loss + options.v_coef * vf_loss
             elif options.rl_algo == RLAlgorithm.DSAC.value:
@@ -357,7 +361,7 @@ def train_reticl(dataset_config: DatasetConfig, train_split: str, dev_split: str
                             q_est_vecs = retriever(**batch)[1][critic_idx]
                         # Get the estimated q value for each selected action
                         q_ests = torch.gather(
-                            q_est_vecs.view(batch_size, max_num_examples, -1),
+                            q_est_vecs.view(batch_size, max_seq_len, -1),
                             dim=2, index=batch["policy_example_indices"].unsqueeze(2)
                         ).squeeze(2)
                         # Minimize soft Bellman residual and update network
@@ -401,15 +405,20 @@ def train_reticl(dataset_config: DatasetConfig, train_split: str, dev_split: str
             if options.rl_algo != RLAlgorithm.DSAC.value:
                 # Maximize entropy - encourages exploration by flattening action distribution
                 entropy = get_entropy(activations)
-                loss[loss_mask] = 0
-                loss = loss.mean() - e_coef * entropy
+                ent_mask = loss_mask.clone()
+                if max_seq_len > options.num_examples:
+                    # Don't compute entropy when eos is forced
+                    ent_mask[:, options.num_examples] = True
+                entropy = entropy[~ent_mask.view(-1)]
+                loss = loss[~loss_mask.view(-1)]
+                loss = loss.mean() - e_coef * entropy.mean()
+                total_loss += loss.item()
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(retriever_params, options.grad_clip)
                 optimizer.step()
                 optimizer.zero_grad()
-                total_loss += loss.detach().cpu().numpy().sum()
                 if vf_loss is not None:
-                    total_vf_loss += vf_loss.detach().cpu().numpy().sum()
+                    total_vf_loss += vf_loss[~loss_mask.view(-1)].mean().item()
 
             # If training encoder, re-compute corpus encodings (after each training step)
             if retriever.encoder is not None:
@@ -430,7 +439,9 @@ def train_reticl(dataset_config: DatasetConfig, train_split: str, dev_split: str
             # Get average reward on validation set
             val_reward = 0
             val_correct = 0
-            val_entropy = None
+            val_entropy = 0
+            val_num_examples = 0
+            val_example_set = set()
             retriever.eval()
             for batch in tqdm(val_loader):
                 for example_idx in batch["policy_example_indices"].view(-1):
@@ -440,17 +451,25 @@ def train_reticl(dataset_config: DatasetConfig, train_split: str, dev_split: str
                 val_reward += rewards.detach().cpu().numpy().sum()
                 _, correct = get_predictions(batch, dataset_config)
                 val_correct += correct.detach().cpu().numpy().sum()
+                val_num_examples += (batch["seq_len"] - 1).sum().item()
 
                 if is_pg(options):
+                    batch_size, max_seq_len = batch["example_encodings"].shape[:2]
+                    ent_mask = torch.arange(max_seq_len).expand(batch_size, -1) >= batch["seq_len"].unsqueeze(1)
+                    if max_seq_len > options.num_examples:
+                        ent_mask[:, options.num_examples] = True
                     activations, _ = retriever(**batch)
-                    val_entropy = get_entropy(activations)
+                    val_entropy += get_entropy(activations)[~ent_mask.view(-1)].mean().item()
 
         # Report stats on current epoch
-        avg_loss = total_loss / len(dataset)
+        avg_loss = total_loss / len(data_loader)
         avg_reward = total_reward / len(dataset)
         avg_val_reward = val_reward / len(val_set)
         avg_val_accuracy = val_correct and val_correct / len(val_set)
-        avg_vf_loss = total_vf_loss / (len(dataset) * max_num_examples) if total_vf_loss != 0 else None
+        avg_vf_loss = total_vf_loss / len(data_loader) if total_vf_loss else None
+        avg_num_examples = train_num_examples / len(dataset)
+        avg_val_num_examples = val_num_examples / len(val_set)
+        avg_val_entropy = val_entropy / len(val_loader) if val_entropy else None
         if run:
             run.log({
                 "loss": avg_loss,
@@ -458,9 +477,11 @@ def train_reticl(dataset_config: DatasetConfig, train_split: str, dev_split: str
                 "reward": avg_reward,
                 "val_reward": avg_val_reward,
                 "val_accuracy": avg_val_accuracy,
-                "train_examples": len(train_example_set),
-                "val_examples": len(val_example_set),
-                "val_entropy": val_entropy,
+                "train_examples_total": len(train_example_set),
+                "train_examples_per": avg_num_examples,
+                "val_examples_total": len(val_example_set),
+                "val_examples_per": avg_val_num_examples,
+                "val_entropy": avg_val_entropy,
                 "epsilon": dataset.epsilon if options.sm == SamplingMethod.EPSILON_GREEDY.value else None,
                 "alpha": alpha if options.rl_algo == RLAlgorithm.DSAC.value else None,
                 "lr": cur_lr,

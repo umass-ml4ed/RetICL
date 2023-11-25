@@ -28,7 +28,7 @@ def get_latent_states(retriever: Retriever, dataset: RetICLDataset, options: Tra
     all_latent_states = []
     data_loader = DataLoader(
         dataset,
-        collate_fn=Collator(),
+        collate_fn=Collator(len(dataset.corpus)),
         batch_size=options.batch_size,
         shuffle=False
     )

@@ -24,7 +24,7 @@ class RetICLAttn(RetICLBase):
             orthogonal_init_(self.example_transform)
             orthogonal_init_(self.attn_activation)
 
-    def _get_latent_states(self, current_sample_encodings: torch.Tensor, example_encodings: torch.Tensor):
+    def get_latent_states(self, current_sample_encodings: torch.Tensor, example_encodings: torch.Tensor, **kwargs):
         # Get sub-latent states from current sample and example encodings
         h_0 = self.h_0_transform(current_sample_encodings) # (N x H)
         example_states = self.example_transform(example_encodings)
@@ -38,6 +38,3 @@ class RetICLAttn(RetICLBase):
         attn_weights = torch.softmax(attn_activations, dim=-1) # (N x L x L)
         latent_states = torch.bmm(attn_weights, sub_latent_states) # (N x L x H)
         return latent_states
-
-    def get_latent_states(self, current_sample_encodings: torch.Tensor, example_encodings: torch.Tensor, **kwargs):
-        return self._get_latent_states(current_sample_encodings, example_encodings)

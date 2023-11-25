@@ -57,7 +57,7 @@ def exhaustive_eval(dataset: RetICLDataset, dataset_config: DatasetConfig, optio
             prompts.append(sample["lm_context"])
             preds.append("")
 
-    return prompts, labels, meta_datas, preds, example_set
+    return prompts, labels, meta_datas, preds, example_set, 1
 
 def policy_eval(dataset: RetICLDataset, options: TrainOptions):
     prompts: List[str] = []
@@ -65,9 +65,10 @@ def policy_eval(dataset: RetICLDataset, options: TrainOptions):
     meta_datas: List[dict] = []
     preds: List[str] = []
     example_set = set()
+    total_examples = 0
     data_loader = DataLoader(
         dataset,
-        collate_fn=Collator(),
+        collate_fn=Collator(len(dataset.corpus)),
         batch_size=options.batch_size,
         shuffle=False
     )
@@ -79,10 +80,11 @@ def policy_eval(dataset: RetICLDataset, options: TrainOptions):
         prompts += batch["prompts"]
         labels += batch["labels"]
         meta_datas += batch["meta_data"]
+        total_examples += (batch["seq_len"] - 1).sum().item()
         for pred in Generator.generate(**batch):
             preds.append(pred["text"])
 
-    return prompts, labels, meta_datas, preds, example_set
+    return prompts, labels, meta_datas, preds, example_set, total_examples / len(dataset)
 
 def evaluate_reticl(run, dataset_config: DatasetConfig, retriever: Optional[Retriever], split: str, options: TrainOptions):
     with torch.no_grad():
@@ -95,9 +97,9 @@ def evaluate_reticl(run, dataset_config: DatasetConfig, retriever: Optional[Retr
 
         # Collect predictions and labels over the dataset
         if options.sm == SamplingMethod.EXHAUSTIVE.value:
-            prompts, labels, meta_datas, preds, example_set = exhaustive_eval(dataset, dataset_config, options)
+            prompts, labels, meta_datas, preds, example_set, examples_per = exhaustive_eval(dataset, dataset_config, options)
         else:
-            prompts, labels, meta_datas, preds, example_set = policy_eval(dataset, options)
+            prompts, labels, meta_datas, preds, example_set, examples_per = policy_eval(dataset, options)
 
         if dataset_config.get("check_correct_batch"):
             correct = dataset_config["check_correct_batch"](meta_datas, preds).numpy()
@@ -107,9 +109,9 @@ def evaluate_reticl(run, dataset_config: DatasetConfig, retriever: Optional[Retr
         if options.dataset == Datasets.TABMWP.value:
             mc_acc = correct[[meta_data["ques_type"] == "multi_choice" for meta_data in meta_datas]].mean() * 100
             free_acc = correct[[meta_data["ques_type"] == "free_text" for meta_data in meta_datas]].mean() * 100
-            print(f"Accuracy: {acc:.2f}, MC: {mc_acc:.2f}, Free: {free_acc:.2f}, Examples: {len(example_set)}")
+            print(f"Accuracy: {acc:.2f}, MC: {mc_acc:.2f}, Free: {free_acc:.2f}, Examples Total: {len(example_set)}, Examples Per: {examples_per:.2f}")
         else:
-            print(f"Accuracy: {acc:.2f}, Examples: {len(example_set)}")
+            print(f"Accuracy: {acc:.2f}, Examples Total: {len(example_set)}, Examples Per: {examples_per:.2f}")
         if run:
             run.config.eval_set = split
             run.summary["accuracy"] = acc

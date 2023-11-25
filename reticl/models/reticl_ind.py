@@ -16,8 +16,8 @@ class RetICLInd(RetICLBase):
             orthogonal_init_(self.h_0_transform)
 
     def get_latent_states(self, current_sample_encodings: torch.Tensor, example_encodings: torch.Tensor, **kwargs):
-        batch_size, num_examples = example_encodings.shape[:2]
+        batch_size, max_seq_len = example_encodings.shape[:2]
         # Independent model has same latent state for all examples
         h_0 = self.h_0_transform(current_sample_encodings) # (N x H)
-        latent_states = h_0.repeat(1, num_examples + 1).view(batch_size, num_examples + 1, -1) # (N x L x H)
+        latent_states = h_0.repeat(1, max_seq_len + 1).view(batch_size, max_seq_len + 1, -1) # (N x L x H)
         return latent_states
