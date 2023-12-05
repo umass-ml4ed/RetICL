@@ -20,7 +20,7 @@ from reticl.constants import SamplingMethod
 
 def get_suffix(options: TrainOptions):
     model_name = options.gpt3_model if options.generator_model == "gpt3" else options.generator_model
-    return f"{options.dataset}_{model_name}_{options.num_examples}"
+    return f"{options.dataset}_{model_name}_ex{options.num_examples}_{options.pt_sample_freq}"
 
 def collect_samples(split: str, dataset_config: DatasetConfig, options_dict: dict):
     options = TrainOptions(options_dict)
@@ -48,6 +48,7 @@ def collect_samples(split: str, dataset_config: DatasetConfig, options_dict: dic
                     "example_metadatas": [
                         dataset.corpus[example_idx]["meta_data"]
                         for example_idx in batch["policy_example_indices"][i]
+                        if example_idx != dataset.eos_idx
                     ],
                     "input_index": batch_idx * options.batch_size + i,
                     "policy_example_indices": batch["policy_example_indices"][i].tolist()
@@ -78,7 +79,6 @@ def pretrain_reticl(dataset_config: DatasetConfig, options_dict: dict):
     val_set = PretrainDataset(val_samples, dataset_config, "dev", options)
     data_loader = DataLoader(
         dataset,
-        # Actual collate done outside loader so it's easier to collect samples for adding to replay buffer
         collate_fn=Collator(len(dataset.corpus)),
         batch_size=options.batch_size,
         shuffle=True,

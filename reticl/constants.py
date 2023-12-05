@@ -6,6 +6,8 @@ class Datasets(Enum):
     MATH = "math"
     SVAMP = "svamp"
     QASC = "qasc"
+    CQA = "cqa"
+    AGNEWS = "agnews"
 
 class ModelType(Enum):
     RNN = "rnn"
@@ -64,4 +66,6 @@ DEFAULT_MAX_GEN_TOKENS = {
     Datasets.TABMWP.value: 450,
     Datasets.GSM8K.value: 400,
     Datasets.QASC.value: 150,
+    Datasets.CQA.value: 100,
+    Datasets.AGNEWS.value: 50,
 }

@@ -115,7 +115,8 @@ def evaluate_reticl(run, dataset_config: DatasetConfig, retriever: Optional[Retr
         if run:
             run.config.eval_set = split
             run.summary["accuracy"] = acc
-            run.summary["eval_examples"] = len(example_set)
+            run.summary["eval_examples_total"] = len(example_set)
+            run.summary["eval_examples_per"] = examples_per
             if options.dataset == Datasets.TABMWP.value:
                 run.summary["mc_accuracy"] = mc_acc
                 run.summary["free_accuracy"] = free_acc

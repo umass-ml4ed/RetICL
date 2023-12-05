@@ -21,7 +21,7 @@ class RetICLBase(nn.Module):
         if options.early_stopping:
             self.early_stop_proj = nn.Linear(options.hidden_size, 1, bias=True)
             # Ensure that at initialization early stopping action has high probability relative to all examples
-            nn.init.constant_(self.early_stop_proj.bias, options.corpus_size * .02)
+            # nn.init.constant_(self.early_stop_proj.bias, options.corpus_size * .02)
         self.num_critics = num_critics
         if num_critics == 0:
             self.value_fn_estimator = nn.Linear(options.hidden_size, 1)

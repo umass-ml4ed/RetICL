@@ -16,6 +16,8 @@ class RetICLAttn(RetICLBase):
             nn.Linear(self.emb_size, options.hidden_size),
             nn.Tanh()
         )
+        # self.h_0_transform = nn.Identity()
+        # self.example_transform = nn.Identity()
         self.attn_activation = nn.Sequential(
             nn.Linear(options.hidden_size, 1),
         )

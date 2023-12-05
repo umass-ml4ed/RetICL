@@ -32,6 +32,8 @@ GSM8K: https://github.com/openai/grade-school-math
 
 QASC: http://data.allenai.org/downloads/qasc/qasc_dataset.tar.gz
 
+CommonsenseQA: https://www.tau-nlp.sites.tau.ac.il/commonsenseqa
+
 SVAMP: https://github.com/arkilpatel/SVAMP
 
 Place those folders in this repo's root folder.

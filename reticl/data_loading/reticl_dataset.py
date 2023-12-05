@@ -173,6 +173,7 @@ class RetICLDataset(TorchDataset):
         if corp_eq_data:
             random_example_idxs = random_example_idxs[random_example_idxs != index]
         random_example_idxs = random_example_idxs[:self.options.num_examples]
+        random_example_idxs = np.concatenate([random_example_idxs, [self.eos_idx]])
         return random_example_idxs, None
 
     def get_knn_examples(self, index: int, cur_sample: DataSample, corp_eq_data: bool):
@@ -182,6 +183,7 @@ class RetICLDataset(TorchDataset):
             top_neighbor_indices = top_neighbor_indices[top_neighbor_indices != index]
         top_neighbor_indices = top_neighbor_indices[:self.options.num_examples]
         top_neighbor_indices = np.flip(top_neighbor_indices).copy()
+        top_neighbor_indices = np.concatenate([top_neighbor_indices, [self.eos_idx]])
         return top_neighbor_indices, None
 
     def get_policy_sampled_examples(self, index: int, cur_sample: DataSample, corp_eq_data: bool):
@@ -355,8 +357,8 @@ class Collator():
                 batch_first=True
             ).to(device) if batch[0]["example_encodings"] is not None else None,
             "seq_len": torch.tensor([
-                len(sample["example_encodings"]) for sample in batch
-            ]) if batch[0]["example_encodings"] is not None else None,
+                len(sample["policy_example_indices"]) for sample in batch
+            ]),
             "policy_example_indices": pad_sequence(
                 [torch.LongTensor(sample["policy_example_indices"]) for sample in batch],
                 batch_first=True,

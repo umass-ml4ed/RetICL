@@ -11,6 +11,8 @@ from reticl.data_loading.data_types import DatasetConfig
 from reticl.data_loading.tabmwp import TABMWP_CONFIG
 from reticl.data_loading.gsm8k import GSM8K_CONFIG
 from reticl.data_loading.qasc import QASC_CONFIG
+from reticl.data_loading.commonsense_qa import CQA_CONFIG
+from reticl.data_loading.ag_news import AGNEWS_CONFIG
 from reticl.data_loading.math import MATH_CONFIG
 from reticl.data_loading.svamp import SVAMP_CONFIG
 from reticl.models.generator import GeneratorCM
@@ -25,6 +27,10 @@ def get_dataset_config(options_dict: dict) -> DatasetConfig:
         return GSM8K_CONFIG
     if options.dataset == Datasets.QASC.value:
         return QASC_CONFIG
+    if options.dataset == Datasets.CQA.value:
+        return CQA_CONFIG
+    if options.dataset == Datasets.AGNEWS.value:
+        return AGNEWS_CONFIG
     if options.dataset == Datasets.MATH.value:
         return MATH_CONFIG
     if options.dataset == Datasets.SVAMP.value:
