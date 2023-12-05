@@ -3,8 +3,9 @@ import torch
 
 from reticl.data_loading.data_types import DatasetConfig
 from reticl.data_loading.reticl_dataset import ICLSample, RetICLDataset
+from reticl.models.retriever import Retriever
 from reticl.models.generator import GeneratorResult
-from reticl.utils import TrainOptions
+from reticl.utils import TrainOptions, device
 
 class PreloadedSample(TypedDict):
     prompt: str
@@ -16,8 +17,9 @@ class PreloadedSample(TypedDict):
     policy_example_indices: List[int]
 
 class PretrainDataset(RetICLDataset):
-    def __init__(self, preloaded_samples: List[PreloadedSample], dataset_config: DatasetConfig, split: str, options: TrainOptions):
-        super().__init__(dataset_config, split, None, options)
+    def __init__(self, preloaded_samples: List[PreloadedSample], dataset_config: DatasetConfig,
+                 split: str, retriever: Retriever, options: TrainOptions, compute_initial_encodings: bool):
+        super().__init__(dataset_config, split, retriever, options, compute_initial_encodings)
         self.preloaded_samples = preloaded_samples
 
     def __len__(self):
@@ -25,14 +27,22 @@ class PretrainDataset(RetICLDataset):
 
     def __getitem__(self, index: int) -> ICLSample:
         cur_sample = self.preloaded_samples[index]
+        og_sample = self.data[cur_sample["input_index"]]
+
+        # Re-compute current sample encoding if using trainable encoder
+        if self.trainable_encoder:
+            self.batch_encode([og_sample], False, False)
+
         return {
             "prompt": cur_sample["prompt"],
             "label": cur_sample["label"],
             "output": cur_sample["output"],
             "meta_data": cur_sample["input_metadata"],
-            "current_sample_encoding": self.data[cur_sample["input_index"]]["context_encoding"],
+            "current_sample_encoding": og_sample["context_encoding"],
             "example_encodings": torch.stack([
                 self.corpus[example_idx]["full_encoding"]
+                if example_idx != self.eos_idx else
+                torch.zeros((self.emb_size,)).to(device)
                 for example_idx in cur_sample["policy_example_indices"]
             ]),
             "all_example_encodings": None,

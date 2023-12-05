@@ -7,16 +7,12 @@ from tqdm import tqdm
 import wandb
 
 from reticl.data_loading.pretrain_dataset import PreloadedSample, PretrainDataset
-from reticl.data_loading.reticl_dataset import RetICLDataset, Collator, CollatedBatch
+from reticl.data_loading.reticl_dataset import RetICLDataset, Collator
 from reticl.data_loading.data_types import DatasetConfig
-from reticl.models.retriever import retriever_model, Retriever
-from reticl.training.train_reticl import get_rewards, get_predictions, get_optim
-from reticl.utils import TrainOptions, device
+from reticl.models.retriever import retriever_model
+from reticl.training.train_reticl import get_returns, get_predictions, get_optim
+from reticl.utils import TrainOptions
 from reticl.constants import SamplingMethod
-
-# TODO for pre-training and baseline
-# (maybe) Enable fine-tuning encoder on large corpus by getting required encodings in collator
-# (maybe) Implement random sampling and ranking at test time for baseline
 
 def get_suffix(options: TrainOptions):
     model_name = options.gpt3_model if options.generator_model == "gpt3" else options.generator_model
@@ -60,6 +56,7 @@ def pretrain_reticl(dataset_config: DatasetConfig, options_dict: dict):
     # TODO: account for early stopping - load and mix datasets of different lengths, properly assign rewards/returns and compute loss
 
     options = TrainOptions(options_dict)
+    assert(options.pt_sample_freq)
     assert(options.pt_model_name)
     if options.wandb:
         run = wandb.init(project="reticl", config=options.as_dict())
@@ -75,8 +72,8 @@ def pretrain_reticl(dataset_config: DatasetConfig, options_dict: dict):
         train_samples = json.load(in_f)
     with open(f"reticl_pretrain_data_dev_{get_suffix(options)}.json") as in_f:
         val_samples = json.load(in_f)
-    dataset = PretrainDataset(train_samples, dataset_config, "train", options)
-    val_set = PretrainDataset(val_samples, dataset_config, "dev", options)
+    dataset = PretrainDataset(train_samples, dataset_config, "train", retriever, options, True)
+    val_set = PretrainDataset(val_samples, dataset_config, "dev", retriever, options, False)
     data_loader = DataLoader(
         dataset,
         collate_fn=Collator(len(dataset.corpus)),
@@ -93,34 +90,39 @@ def pretrain_reticl(dataset_config: DatasetConfig, options_dict: dict):
     )
 
     print("Training...")
-    # loss_fn = torch.nn.MSELoss()
-    loss_fn = torch.nn.BCEWithLogitsLoss()
-    best_val_loss = None
+    loss_fn = torch.nn.MSELoss()
+    best_val_acc = None
     for epoch in range(options.epochs):
         retriever.train()
         total_train_loss = 0
         for batch in tqdm(data_loader):
-            _, correct = get_predictions(batch, dataset_config)
-            returns = correct.repeat_interleave(options.num_examples).to(device)
+            returns, _, correct = get_returns(batch, dataset_config, options)
+            returns = returns.view(-1, options.num_examples + 1)[:, 1:].contiguous().view(-1) # Don't use initial state
             value_estimates = retriever.get_vfe(batch["current_sample_encodings"], batch["example_encodings"])
-            value_estimates = value_estimates[:, 1:] # Don't train on initial state since doesn't impact example selection
+            value_estimates = value_estimates[:, 1:-1] # Don't use initial state or terminal state
             loss = loss_fn(value_estimates.contiguous().view(-1), returns)
             total_train_loss += loss.item()
             loss.backward()
             optim.step()
             optim.zero_grad()
 
+            # If training encoder, re-compute corpus encodings (after each training step)
+            if retriever.encoder is not None:
+                dataset.compute_corpus_encodings(False)
+
         total_val_loss = 0
         total_val_correct = 0
-        true_correct = 0
         retriever.eval()
         with torch.no_grad():
+            # Re-compute corpus encodings for validation set if training encoder
+            if retriever.encoder is not None:
+                val_set.compute_corpus_encodings()
+
             for batch in tqdm(val_loader):
-                _, correct = get_predictions(batch, dataset_config)
-                true_correct += correct.sum().item()
-                returns = correct.repeat_interleave(options.num_examples).to(device)
+                returns, _, correct = get_returns(batch, dataset_config, options)
+                returns = returns.view(-1, options.num_examples + 1)[:, 1:].contiguous().view(-1)
                 value_estimates = retriever.get_vfe(batch["current_sample_encodings"], batch["example_encodings"])
-                value_estimates = value_estimates[:, 1:]
+                value_estimates = value_estimates[:, 1:-1]
                 loss = loss_fn(value_estimates.contiguous().view(-1), returns)
                 total_val_loss += loss.item()
                 hard_predictions = value_estimates[:, -1].detach().cpu()
@@ -131,17 +133,16 @@ def pretrain_reticl(dataset_config: DatasetConfig, options_dict: dict):
         avg_train_loss = total_train_loss / len(dataset)
         avg_val_loss = total_val_loss / len(val_set)
         avg_val_acc = total_val_correct / len(val_set)
-        avg_true_correct = true_correct / len(val_set)
         if run:
             run.log({
                 "train_loss": avg_train_loss,
                 "val_loss": avg_val_loss,
                 "val_accuracy": avg_val_acc
             })
-        print(f"Epoch {epoch + 1}, Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}, Val Acc: {avg_val_acc:.4f}, True Correct: {avg_true_correct:.4f}")
+        print(f"Epoch {epoch + 1}, Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}, Val Acc: {avg_val_acc:.4f}")
 
-        if not best_val_loss or avg_val_loss < best_val_loss:
-            best_val_loss = avg_val_loss
+        if not best_val_acc or avg_val_acc > best_val_acc:
+            best_val_acc = avg_val_acc
             print("Best! Saving model...")
             best_model.load_state_dict(retriever.state_dict())
             torch.save(best_model.state_dict(), f"{options.pt_model_name}.pt")

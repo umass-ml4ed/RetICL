@@ -33,30 +33,46 @@ def get_predictions(batch: CollatedBatch, dataset_config: DatasetConfig):
     return predictions, correct
 
 def get_rewards(batch: CollatedBatch, dataset_config: DatasetConfig, options: TrainOptions):
+    rewards = None
+
     if options.reward in (Reward.EXACT.value, Reward.EXACT_AND_PPL.value, Reward.EXACT_AND_BLEU.value):
         predictions, correct = get_predictions(batch, dataset_config)
 
         if options.reward == Reward.EXACT.value:
             # Reward is 1 if prediction is correct, -1 otherwise
-            return 2 * correct - 1
+            rewards = 2 * correct - 1
 
-        if options.reward == Reward.EXACT_AND_PPL.value:
+        elif options.reward == Reward.EXACT_AND_PPL.value:
             ppl = torch.tensor([-pred["nll"] for pred in predictions]).exp()
-            return 2 * (correct * (1 - options.cr_coef) + ppl * options.cr_coef) - 1
+            rewards = 2 * (correct * (1 - options.cr_coef) + ppl * options.cr_coef) - 1
 
-        if options.reward == Reward.EXACT_AND_BLEU.value:
+        elif options.reward == Reward.EXACT_AND_BLEU.value:
             # Calculate bleu score on the generated solutions
             bleu = torch.Tensor([
                 nltk.translate.bleu([target], pred["text"])
                 for pred, target in zip (predictions, batch["labels"])
             ])
             # Half of reward comes from bleu and other half from final correctness
-            return correct + bleu - 1
+            rewards = correct + bleu - 1
 
     # Reward is inverse perplexity assigned to label given the context
-    if options.reward == Reward.PPL.value:
+    elif options.reward == Reward.PPL.value:
         nlls = Generator.get_nll(**batch)
-        return 2 * torch.exp(-nlls) - 1
+        rewards = 2 * torch.exp(-nlls) - 1
+
+    return rewards, correct
+
+def get_returns(batch: CollatedBatch, dataset_config: DatasetConfig, options: TrainOptions):
+    # Calculate rewards and returns for batch - rewards given at eos actions
+    batch_size, max_seq_len = batch["example_encodings"].shape[:2]
+    final_rewards, correct = get_rewards(batch, dataset_config, options) # (N)
+    rewards = torch.zeros((batch_size, max_seq_len), device=device) # (N x L)
+    rewards[torch.arange(batch_size), batch["seq_len"] - 1] = final_rewards.to(device)
+    returns = rewards.clone()
+    for idx in range(max_seq_len - 2, -1, -1):
+        returns[:, idx] += options.gamma * returns[:, idx + 1]
+    returns = returns.view(-1) # (N * L)
+    return returns, rewards, correct
 
 def get_td_error(value_estimates: torch.Tensor, rewards: torch.Tensor, options: TrainOptions):
     batch_size = rewards.shape[0]
@@ -172,7 +188,7 @@ def train_reticl(dataset_config: DatasetConfig, train_split: str, dev_split: str
         target_entropy = options.e_coef * torch.log(torch.tensor(options.corpus_size))
 
     # Create train/val datasets/loaders
-    dataset = RetICLDataset(dataset_config, train_split, retriever, options)
+    dataset = RetICLDataset(dataset_config, train_split, retriever, options, True)
     val_set = RetICLDataset(dataset_config, dev_split, retriever, options, False)
     val_set.set_greedy(True) # Use greedy retrieval for validation
     data_loader = DataLoader(
@@ -231,15 +247,9 @@ def train_reticl(dataset_config: DatasetConfig, train_split: str, dev_split: str
                 train_example_set.add(example_idx.item())
             train_num_examples += (batch["seq_len"] - 1).sum().item()
 
-            # Calculate rewards and returns for batch - rewards given at eos actions
-            final_rewards = get_rewards(batch, dataset_config, options).to(device) # (N)
-            total_reward += final_rewards.detach().cpu().numpy().sum()
-            rewards = torch.zeros((batch_size, max_seq_len), device=device) # (N x L)
-            rewards[torch.arange(batch_size), batch["seq_len"] - 1] = final_rewards
-            returns = rewards.clone()
-            for idx in range(max_seq_len - 2, -1, -1):
-                returns[:, idx] += options.gamma * returns[:, idx + 1]
-            returns = returns.view(-1) # (N * L)
+            # Get rewards and returns
+            returns, rewards, _ = get_returns(batch, dataset_config, options)
+            total_reward += rewards.detach().cpu().numpy().sum()
 
             # Off-policy: add to buffer
             if options.rl_algo == RLAlgorithm.DSAC.value:
@@ -447,9 +457,8 @@ def train_reticl(dataset_config: DatasetConfig, train_split: str, dev_split: str
                 for example_idx in batch["policy_example_indices"].view(-1):
                     val_example_set.add(example_idx.item())
 
-                rewards = get_rewards(batch, dataset_config, options).to(device)
+                _, rewards, correct = get_returns(batch, dataset_config, options)
                 val_reward += rewards.detach().cpu().numpy().sum()
-                _, correct = get_predictions(batch, dataset_config)
                 val_correct += correct.detach().cpu().numpy().sum()
                 val_num_examples += (batch["seq_len"] - 1).sum().item()
 

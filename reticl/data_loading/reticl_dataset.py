@@ -91,6 +91,7 @@ class RetICLDataset(TorchDataset):
             complexity_metric = dataset_config.get("complexity_metric", lambda sample: sample["lm_label"].count("\n"))
             corpus_complexity = [-complexity_metric(sample) for sample in self.corpus]
             self.complex_example_idxs = np.flip(np.argsort(corpus_complexity)[:options.num_examples]).copy()
+            self.complex_example_idxs = np.concatenate([self.complex_example_idxs, [self.eos_idx]])
 
     def batch_encode(self, samples: List[DataSample], inc_label: bool, show_progress: bool = True):
         batch_size = 10
@@ -239,33 +240,35 @@ class RetICLDataset(TorchDataset):
                 if beam["example_idxs"] and beam["example_idxs"][-1] == self.eos_idx:
                     beam_cands.append(beam)
                     continue
-                if self.options.sm == SamplingMethod.VF.value:
-                    # TODO: if this is really slow then can cache previous states and pass to initial hidden state
-                    activations = self.retriever.get_last_vfe(
-                        current_sample_encodings=cur_sample["context_encoding"].repeat(self.encoding_matrix.shape[0], 1),
-                        example_encodings=torch.cat([
-                            beam["example_encodings"].unsqueeze(0).repeat(self.encoding_matrix.shape[0], 1, 1),
-                            self.encoding_matrix.unsqueeze(1)
-                        ], dim=1),
-                    )
-                    activations[beam["used_idxs"]] = -torch.inf
-                else:
-                    activations = self.retriever.get_activations(
-                        current_sample_encoding=cur_sample["context_encoding"],
-                        example_encodings=beam["example_encodings"],
-                        all_example_encodings=self.encoding_matrix,
-                        used_idxs=beam["used_idxs"]
-                    )
-                pi_cur = torch.softmax(activations, dim=0)
                 if len(beam["example_idxs"]) < self.options.num_examples:
+                    if self.options.sm == SamplingMethod.VF.value:
+                        # TODO: if this is really slow then can cache previous states and pass to initial hidden state
+                        activations = self.retriever.get_last_vfe(
+                            current_sample_encodings=cur_sample["context_encoding"].repeat(self.encoding_matrix.shape[0], 1),
+                            example_encodings=torch.cat([
+                                beam["example_encodings"].unsqueeze(0).repeat(self.encoding_matrix.shape[0], 1, 1),
+                                self.encoding_matrix.unsqueeze(1)
+                            ], dim=1),
+                        )
+                        activations[beam["used_idxs"]] = -torch.inf
+                    else:
+                        activations = self.retriever.get_activations(
+                            current_sample_encoding=cur_sample["context_encoding"],
+                            example_encodings=beam["example_encodings"],
+                            all_example_encodings=self.encoding_matrix,
+                            used_idxs=beam["used_idxs"]
+                        )
+                    pi_cur = torch.softmax(activations, dim=0)
                     example_idx_cands = torch.topk(activations, self.options.beam_width)[1].tolist()
                 else:
                     example_idx_cands = [self.eos_idx]
                 for example_idx in example_idx_cands:
                     if example_idx == self.eos_idx:
-                        # TODO: if we want to do early stopping with baseline, need to use learnable eos token embedding
+                        score = beam["prob"] if self.options.sm == SamplingMethod.VF.value else 1
+                        # TODO: if we want to do early stopping with vf, need to use learnable eos token embedding
                         example_encoding = torch.zeros((self.emb_size,))
                     else:
+                        score = pi_cur[example_idx].item()
                         example_encoding = self.corpus[example_idx]["full_encoding"]
                     new_example_encodings = torch.cat([
                         beam["example_encodings"],
@@ -275,10 +278,10 @@ class RetICLDataset(TorchDataset):
                         "example_idxs": beam["example_idxs"] + [example_idx],
                         "used_idxs": beam["used_idxs"] + [example_idx],
                         "example_encodings": new_example_encodings,
-                        "prob": pi_cur[example_idx].item() * (1 if self.options.sm == SamplingMethod.VF.value else beam["prob"])
+                        "prob": score * (1 if self.options.sm == SamplingMethod.VF.value else beam["prob"])
                     })
             beams = sorted(beam_cands, key=lambda beam: -beam["prob"])[:self.options.beam_width]
-        top_beam = sorted(beam_cands, key=lambda beam: -beam["prob"])[0]
+        top_beam = sorted(beams, key=lambda beam: -beam["prob"])[0]
         return top_beam["example_idxs"], top_beam["example_encodings"]
 
     def __getitem__(self, index: int) -> ICLSample:
