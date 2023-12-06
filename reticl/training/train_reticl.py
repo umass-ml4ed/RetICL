@@ -1,5 +1,7 @@
 from typing import List
 import os
+import random
+import numpy as np
 import torch
 from torch.utils.data import DataLoader
 import torch.nn.functional as F
@@ -211,7 +213,8 @@ def train_reticl(dataset_config: DatasetConfig, train_split: str, dev_split: str
     print("Training...")
     # torch.autograd.set_detect_anomaly(True)
     if options.rl_algo == RLAlgorithm.PPO.value:
-        previous_model = None
+        previous_model = retriever_model(options)
+        previous_model.load_state_dict(retriever.state_dict())
     if options.rl_algo == RLAlgorithm.DSAC.value:
         replay_buffer = ReplayBuffer(options)
     best_val_accuracy = None
@@ -225,6 +228,7 @@ def train_reticl(dataset_config: DatasetConfig, train_split: str, dev_split: str
         total_vf_loss = 0
         train_num_examples = 0
         train_example_set = set()
+        clip_fractions = []
 
         # Update exploration parameters
         cur_lr = optimizer.param_groups[0]["lr"]
@@ -261,7 +265,7 @@ def train_reticl(dataset_config: DatasetConfig, train_split: str, dev_split: str
                     continue
 
             # On-policy: get activations on current examples and value function estimates from retriever
-            if options.rl_algo != RLAlgorithm.DSAC.value:
+            if options.rl_algo != RLAlgorithm.DSAC.value and options.rl_algo != RLAlgorithm.PPO.value:
                 if options.sep_val_model:
                     activations, _ = retriever(**batch)
                     _, value_estimates = val_est_model(**batch)
@@ -270,11 +274,16 @@ def train_reticl(dataset_config: DatasetConfig, train_split: str, dev_split: str
 
             # Loss mask - don't compute loss on padding regions
             loss_mask = torch.arange(max_seq_len).expand(batch_size, -1) >= batch["seq_len"].unsqueeze(1)
+            ent_mask = loss_mask.clone()
+            if max_seq_len > options.num_examples:
+                # Don't compute entropy when eos is forced
+                ent_mask[:, options.num_examples] = True
 
             # Calculate loss and backprop
             vf_loss = None
             if options.rl_algo == RLAlgorithm.MCC.value:
                 loss = torch.nn.MSELoss(reduction="none")(activations, returns)
+
             elif options.rl_algo == RLAlgorithm.REINFORCE.value:
                 # REINFORCE: param = param + lr * G * grad(log(pi[a]))
                 # GD: param = param - lr * grad(loss)
@@ -285,12 +294,14 @@ def train_reticl(dataset_config: DatasetConfig, train_split: str, dev_split: str
                 loss_fn = torch.nn.CrossEntropyLoss(reduction="none")
                 loss = loss_fn(activations, batch["policy_example_indices"].view(-1))
                 loss = loss * returns.view(-1)
+
             elif options.rl_algo == RLAlgorithm.RWB.value:
                 pg_loss_fn = torch.nn.CrossEntropyLoss(reduction="none")
                 pg_loss = pg_loss_fn(activations, batch["policy_example_indices"].view(-1))
                 pg_loss = pg_loss * (returns.view(-1) - value_estimates.detach()) # Don't differentiate w.r.t. baseline
                 vf_loss = torch.nn.MSELoss(reduction="none")(value_estimates, returns)
                 loss = pg_loss + options.v_coef * vf_loss
+
             elif options.rl_algo == RLAlgorithm.AC.value:
                 td_error = get_td_error(value_estimates, rewards, options)
                 pg_loss_fn = torch.nn.CrossEntropyLoss(reduction="none")
@@ -299,37 +310,79 @@ def train_reticl(dataset_config: DatasetConfig, train_split: str, dev_split: str
                 # (r_t + v_(t+1) - v_t)^2 = ((r_t + v_(t+1) - v_t + v_t) - v_t)^2 = ((td_err + v_t) - v_t)^2
                 vf_loss = torch.nn.MSELoss(reduction="none")(value_estimates, td_error + value_estimates.detach())
                 loss = pg_loss + options.v_coef * vf_loss
+
             elif options.rl_algo == RLAlgorithm.PPO.value:
-                # Get policy ratio
-                if not previous_model:
-                    ratio = torch.ones((batch_size * max_seq_len)).to(device)
-                    previous_model = retriever_model(options)
-                else:
-                    with torch.no_grad():
-                        pi_old_activations, _ = previous_model(**batch)
-                    cur_policy_probs = torch.softmax(activations, dim=-1)[torch.arange(batch_size * max_seq_len), batch["policy_example_indices"].view(-1)]
-                    old_policy_probs = torch.softmax(pi_old_activations, dim=-1)[torch.arange(batch_size * max_seq_len), batch["policy_example_indices"].view(-1)]
-                    ratio = cur_policy_probs / old_policy_probs
+                # Get previous action probabilities
+                with torch.no_grad():
+                    pi_old_activations, _ = previous_model(**batch)
+                    old_policy_probs = torch.softmax(pi_old_activations, dim=-1)[
+                        torch.arange(batch_size * max_seq_len), batch["policy_example_indices"].view(-1)]
+
                 # Copy model for next iteration
                 previous_model.load_state_dict(retriever.state_dict())
 
                 # Get estimated advantage
+                with torch.no_grad():
+                    if options.sep_val_model:
+                        _, value_estimates = val_est_model(**batch)
+                    else:
+                        _, value_estimates = retriever(**batch)
                 advantage = get_gae(value_estimates, rewards, options)
+                returns = advantage + value_estimates # Use TD(lambda) return as value function target
 
-                # Get clip loss
-                clip_loss = -torch.min(ratio * advantage, torch.clip(ratio, 1 - options.ppo_eps, 1 + options.ppo_eps) * advantage)
+                for _ in range(options.inner_epochs):
+                    idxs = list(range(batch_size * max_seq_len))
+                    random.shuffle(idxs)
+                    for start_idx in range(0, len(idxs), options.sub_batch_size):
+                        sub_batch_idxs = idxs[start_idx : start_idx + options.sub_batch_size]
+                        if options.sep_val_model:
+                            activations, _ = retriever(**batch)
+                            _, value_estimates = val_est_model(**batch)
+                        else:
+                            activations, value_estimates = retriever(**batch)
 
-                # Get value function loss
-                vf_loss = torch.nn.MSELoss(reduction="none")(value_estimates, returns)
+                        # Get clip loss
+                        sub_batch_loss_mask = loss_mask.view(-1)[sub_batch_idxs]
+                        sub_batch_activations = activations[sub_batch_idxs]
+                        sub_batch_policy_example_idxs = batch["policy_example_indices"].view(-1)[sub_batch_idxs]
+                        sub_batch_cur_probs = torch.softmax(sub_batch_activations, dim=-1)[
+                            torch.arange(len(sub_batch_idxs)), sub_batch_policy_example_idxs]
+                        sub_batch_old_probs = old_policy_probs[sub_batch_idxs]
+                        ratio = sub_batch_cur_probs / sub_batch_old_probs
+                        sub_batch_advantage = advantage[sub_batch_idxs]
+                        clip_loss = -torch.min(
+                            ratio * sub_batch_advantage,
+                            torch.clip(ratio, 1 - options.ppo_eps, 1 + options.ppo_eps) * sub_batch_advantage
+                        )
+                        clip_loss = clip_loss[~sub_batch_loss_mask].mean()
+                        clip_fractions.append((torch.abs(ratio - 1) > options.ppo_eps).float().mean().item())
 
-                # Get final loss
-                if options.sep_val_model:
-                    loss = clip_loss
-                    vf_loss[loss_mask.view(-1)] = 0
-                    vf_loss = vf_loss.sum() / (~loss_mask).sum()
-                    vf_loss.backward()
-                else:
-                    loss = clip_loss + options.v_coef * vf_loss
+                        # Get value function loss
+                        sub_batch_value_estimates = value_estimates[sub_batch_idxs]
+                        sub_batch_returns = returns[sub_batch_idxs]
+                        vf_loss = torch.nn.MSELoss(reduction="none")(sub_batch_value_estimates, sub_batch_returns)
+                        vf_loss = vf_loss[~sub_batch_loss_mask].mean()
+                        total_vf_loss += vf_loss.item()
+
+                        # Get final loss
+                        if options.sep_val_model:
+                            loss = clip_loss
+                            vf_loss.backward()
+                        else:
+                            loss = clip_loss + options.v_coef * vf_loss
+                        # Maximize entropy - encourages exploration by flattening action distribution
+                        sub_batch_ent_mask = ent_mask.view(-1)[sub_batch_idxs]
+                        entropy = get_entropy(sub_batch_activations)
+                        entropy = entropy[~sub_batch_ent_mask].mean()
+                        loss = loss - e_coef * entropy
+                        total_loss += loss.item()
+                        loss.backward()
+                        torch.nn.utils.clip_grad_norm_(retriever_params, options.grad_clip)
+                        optimizer.step()
+                        optimizer.zero_grad()
+
+                        # TODO: log after all inner epochs done
+
             elif options.rl_algo == RLAlgorithm.DSAC.value:
                 # Implementation roughly based on https://github.com/p-christ/Deep-Reinforcement-Learning-Algorithms-with-PyTorch
                 for _ in range(options.updates_per_batch):
@@ -412,13 +465,9 @@ def train_reticl(dataset_config: DatasetConfig, train_split: str, dev_split: str
                 raise Exception(f"Algorithm {options.rl_algo} not supported!")
 
             # Do gradient step (DSAC has its own)
-            if options.rl_algo != RLAlgorithm.DSAC.value:
+            if options.rl_algo != RLAlgorithm.DSAC.value and options.rl_algo != RLAlgorithm.PPO.value:
                 # Maximize entropy - encourages exploration by flattening action distribution
                 entropy = get_entropy(activations)
-                ent_mask = loss_mask.clone()
-                if max_seq_len > options.num_examples:
-                    # Don't compute entropy when eos is forced
-                    ent_mask[:, options.num_examples] = True
                 entropy = entropy[~ent_mask.view(-1)]
                 loss = loss[~loss_mask.view(-1)]
                 loss = loss.mean() - e_coef * entropy.mean()
@@ -494,6 +543,7 @@ def train_reticl(dataset_config: DatasetConfig, train_split: str, dev_split: str
                 "epsilon": dataset.epsilon if options.sm == SamplingMethod.EPSILON_GREEDY.value else None,
                 "alpha": alpha if options.rl_algo == RLAlgorithm.DSAC.value else None,
                 "lr": cur_lr,
+                "clip_fraction": np.mean(clip_fractions),
             })
         print(f"Epoch {epoch + 1}, Loss: {avg_loss:.4f}, Reward: {avg_reward:.4f}, Val Reward: {avg_val_reward:.4f}, "
               f"Val Acc: {avg_val_accuracy:.4f}, Train Examples: {len(train_example_set)}, Val Examples: {len(val_example_set)}")
