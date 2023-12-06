@@ -47,6 +47,7 @@ class TrainOptions:
         self.wandb: bool = options_dict.get("wandb", False)
         self.lr: float = options_dict.get("lr", 1e-3)
         self.wd: float = options_dict.get("wd", 1e-2)
+        self.adam_eps: float = options_dict.get("adam_eps", 1e-8)
         self.grad_clip: float = options_dict.get("grad_clip", 2.0)
         self.ppo_eps: float = options_dict.get("ppo_eps", 0.1)
         self.tau: float = options_dict.get("tau", 0.01)

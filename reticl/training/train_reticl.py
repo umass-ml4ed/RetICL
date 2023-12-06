@@ -108,7 +108,7 @@ def get_optim(models: List[Retriever], options: TrainOptions, checkpoint = None)
     optimizer = torch.optim.AdamW([
         {"params": retriever_params},
         {"params": encoder_params, "lr": options.encoder_lr or options.lr}
-    ], lr=options.lr, weight_decay=options.wd)
+    ], lr=options.lr, weight_decay=options.wd, eps=options.adam_eps)
     if checkpoint is not None:
         optimizer.load_state_dict(checkpoint)
     if options.lr_sched == LRSchedule.LINEAR.value:
@@ -224,10 +224,10 @@ def train_reticl(dataset_config: DatasetConfig, train_split: str, dev_split: str
     starting_epoch = 0 if checkpoint is None else checkpoint["epoch"]
     for epoch in range(starting_epoch, options.epochs):
         total_reward = 0
-        total_loss = 0
-        total_vf_loss = 0
         train_num_examples = 0
         train_example_set = set()
+        losses = []
+        vf_losses = []
         clip_fractions = []
 
         # Update exploration parameters
@@ -362,7 +362,7 @@ def train_reticl(dataset_config: DatasetConfig, train_split: str, dev_split: str
                         sub_batch_returns = returns[sub_batch_idxs]
                         vf_loss = torch.nn.MSELoss(reduction="none")(sub_batch_value_estimates, sub_batch_returns)
                         vf_loss = vf_loss[~sub_batch_loss_mask].mean()
-                        total_vf_loss += vf_loss.item()
+                        vf_losses.append(vf_loss.item())
 
                         # Get final loss
                         if options.sep_val_model:
@@ -375,13 +375,11 @@ def train_reticl(dataset_config: DatasetConfig, train_split: str, dev_split: str
                         entropy = get_entropy(sub_batch_activations)
                         entropy = entropy[~sub_batch_ent_mask].mean()
                         loss = loss - e_coef * entropy
-                        total_loss += loss.item()
+                        losses.append(loss.item())
                         loss.backward()
                         torch.nn.utils.clip_grad_norm_(retriever_params, options.grad_clip)
                         optimizer.step()
                         optimizer.zero_grad()
-
-                        # TODO: log after all inner epochs done
 
             elif options.rl_algo == RLAlgorithm.DSAC.value:
                 # Implementation roughly based on https://github.com/p-christ/Deep-Reinforcement-Learning-Algorithms-with-PyTorch
@@ -436,7 +434,7 @@ def train_reticl(dataset_config: DatasetConfig, train_split: str, dev_split: str
                         else:
                             torch.nn.utils.clip_grad_norm_(retriever.parameters(), options.grad_clip)
                         critic_optims[critic_idx].step()
-                        total_vf_loss += loss.item() / options.updates_per_batch
+                        vf_losses.append(loss.item())
 
                     # Anneal targets towards critics using Polyak update
                     if options.sep_val_model:
@@ -460,7 +458,7 @@ def train_reticl(dataset_config: DatasetConfig, train_split: str, dev_split: str
                     actor_loss.backward()
                     torch.nn.utils.clip_grad_norm_(retriever_params, options.grad_clip)
                     optimizer.step()
-                    total_loss += actor_loss.item() / options.updates_per_batch
+                    losses.append(actor_loss.item())
             else:
                 raise Exception(f"Algorithm {options.rl_algo} not supported!")
 
@@ -471,13 +469,13 @@ def train_reticl(dataset_config: DatasetConfig, train_split: str, dev_split: str
                 entropy = entropy[~ent_mask.view(-1)]
                 loss = loss[~loss_mask.view(-1)]
                 loss = loss.mean() - e_coef * entropy.mean()
-                total_loss += loss.item()
+                losses.append(loss.item())
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(retriever_params, options.grad_clip)
                 optimizer.step()
                 optimizer.zero_grad()
                 if vf_loss is not None:
-                    total_vf_loss += vf_loss[~loss_mask.view(-1)].mean().item()
+                    vf_losses.append(vf_loss[~loss_mask.view(-1)].mean().item())
 
             # If training encoder, re-compute corpus encodings (after each training step)
             if retriever.encoder is not None:
@@ -520,18 +518,17 @@ def train_reticl(dataset_config: DatasetConfig, train_split: str, dev_split: str
                     val_entropy += get_entropy(activations)[~ent_mask.view(-1)].mean().item()
 
         # Report stats on current epoch
-        avg_loss = total_loss / len(data_loader)
+        avg_loss = np.mean(losses)
         avg_reward = total_reward / len(dataset)
         avg_val_reward = val_reward / len(val_set)
         avg_val_accuracy = val_correct and val_correct / len(val_set)
-        avg_vf_loss = total_vf_loss / len(data_loader) if total_vf_loss else None
         avg_num_examples = train_num_examples / len(dataset)
         avg_val_num_examples = val_num_examples / len(val_set)
         avg_val_entropy = val_entropy / len(val_loader) if val_entropy else None
         if run:
             run.log({
                 "loss": avg_loss,
-                "vf_loss": avg_vf_loss,
+                "vf_loss": np.mean(vf_losses) if vf_losses else None,
                 "reward": avg_reward,
                 "val_reward": avg_val_reward,
                 "val_accuracy": avg_val_accuracy,

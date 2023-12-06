@@ -73,6 +73,7 @@ def main():
     parser.add_argument("--wandb", action="store_true", help="Use Weights & Biases for logging")
     parser.add_argument("--lr", type=float, help="Learning rate")
     parser.add_argument("--wd", type=float, help="Weight decay")
+    parser.add_argument("--adam_eps", type=float, help="Adam optimizer epsilon")
     parser.add_argument("--grad_clip", type=float, help="Gradient clipping norm total value")
     parser.add_argument("--ppo_eps", type=float, help="Epsilon value for PPO objective clipping")
     parser.add_argument("--tau", type=float, help="Off-policy: annealing coefficient for Polyak updates on critic targets")
