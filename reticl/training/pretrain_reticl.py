@@ -12,7 +12,7 @@ from reticl.data_loading.data_types import DatasetConfig
 from reticl.models.retriever import retriever_model
 from reticl.training.train_reticl import get_returns, get_predictions, get_optim
 from reticl.utils import TrainOptions
-from reticl.constants import SamplingMethod
+from reticl.constants import SamplingMethod, Reward
 
 def get_suffix(options: TrainOptions):
     model_name = options.gpt3_model if options.generator_model == "gpt3" else options.generator_model
@@ -58,6 +58,7 @@ def pretrain_reticl(dataset_config: DatasetConfig, options_dict: dict):
     options = TrainOptions(options_dict)
     assert(options.pt_sample_freq)
     assert(options.pt_model_name)
+    assert(options.reward == Reward.EXACT.value)
     if options.wandb:
         run = wandb.init(project="reticl", config=options.as_dict())
     else:

@@ -21,6 +21,8 @@ class PretrainDataset(RetICLDataset):
                  split: str, retriever: Retriever, options: TrainOptions, compute_initial_encodings: bool):
         super().__init__(dataset_config, split, retriever, options, compute_initial_encodings)
         self.preloaded_samples = preloaded_samples
+        correct = sum(dataset_config["check_correct"](sample["input_metadata"], sample["output"]["text"]) for sample in self.preloaded_samples)
+        print(f"Correct: {correct}/{len(self.preloaded_samples)} ({correct / len(self.preloaded_samples) * 100:.2f}%)")
 
     def __len__(self):
         return len(self.preloaded_samples)

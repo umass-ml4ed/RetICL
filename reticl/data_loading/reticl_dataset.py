@@ -89,9 +89,10 @@ class RetICLDataset(TorchDataset):
 
         if options.sm == SamplingMethod.COMPLEX.value:
             complexity_metric = dataset_config.get("complexity_metric", lambda sample: sample["lm_label"].count("\n"))
-            corpus_complexity = [-complexity_metric(sample) for sample in self.corpus]
-            self.complex_example_idxs = np.flip(np.argsort(corpus_complexity)[:options.num_examples]).copy()
-            self.complex_example_idxs = np.concatenate([self.complex_example_idxs, [self.eos_idx]])
+            corpus_complexity = np.array([-complexity_metric(sample) for sample in self.corpus])
+            sorted_idxs = np.argsort(corpus_complexity)
+            min_complexity = corpus_complexity[sorted_idxs[options.num_examples]]
+            self.complex_example_idxs = (corpus_complexity <= min_complexity).nonzero()[0].tolist()
 
     def batch_encode(self, samples: List[DataSample], inc_label: bool, show_progress: bool = True):
         batch_size = 10
@@ -186,6 +187,14 @@ class RetICLDataset(TorchDataset):
         top_neighbor_indices = np.flip(top_neighbor_indices).copy()
         top_neighbor_indices = np.concatenate([top_neighbor_indices, [self.eos_idx]])
         return top_neighbor_indices, None
+
+    def get_complexity_examples(self, index: int, corp_eq_data: bool):
+        example_idxs = np.array(random.sample(self.complex_example_idxs, self.options.num_examples + 1))
+        if corp_eq_data:
+            example_idxs = example_idxs[example_idxs != index]
+        example_idxs = example_idxs[:self.options.num_examples]
+        example_idxs = np.concatenate([example_idxs, [self.eos_idx]])
+        return example_idxs, None
 
     def get_policy_sampled_examples(self, index: int, cur_sample: DataSample, corp_eq_data: bool):
         example_idxs: List[int] = []
@@ -307,7 +316,7 @@ class RetICLDataset(TorchDataset):
             elif self.options.sm == SamplingMethod.SIMILARITY.value:
                 example_idxs, example_encodings = self.get_knn_examples(index, cur_sample, corp_eq_data)
             elif self.options.sm == SamplingMethod.COMPLEX.value:
-                example_idxs, example_encodings = self.complex_example_idxs, None
+                example_idxs, example_encodings = self.get_complexity_examples(index, corp_eq_data)
             else:
                 if self.greedy:
                     example_idxs, example_encodings = self.get_beam_search_examples(index, cur_sample, corp_eq_data)
