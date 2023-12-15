@@ -59,6 +59,14 @@ Baselines:
 ```
 python3 run.py --eval test --sm random --dataset gsm8k
 python3 run.py --eval test --sm sim --dataset gsm8k
+python3 run.py --eval test --sm complex --dataset gsm8k
+```
+
+LSTM Classifier Baseline:
+```
+python3 run.py --create_pretrain_dataset --pt_sample_freq 20 --dataset gsm8k
+python3 run.py --pretrain --pt_sample_freq 20 --dataset gsm8k --pt_model_name gsm8k_lstm_classifier
+python3 run.py --eval test --sm vf --dataset gsm8k --model_name gsm8k_lstm_classifier
 ```
 
 ## External Code
