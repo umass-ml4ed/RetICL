@@ -49,7 +49,7 @@ class TrainOptions:
         self.wd: float = options_dict.get("wd", 1e-2)
         self.adam_eps: float = options_dict.get("adam_eps", 1e-8)
         self.grad_clip: float = options_dict.get("grad_clip", 2.0)
-        self.ppo_eps: float = options_dict.get("ppo_eps", 0.1)
+        self.ppo_eps: float = options_dict.get("ppo_eps", 0.2)
         self.tau: float = options_dict.get("tau", 0.01)
         self.replay_buffer_size: int = options_dict.get("replay_buffer_size", 10_000)
         self.updates_per_batch: int = options_dict.get("updates_per_batch", 10)
@@ -72,13 +72,14 @@ class TrainOptions:
         self.v_coef: float = options_dict.get("v_coef", 0.5)
         self.e_coef: float = options_dict.get("e_coef", 0.0)
         self.cr_coef: float = options_dict.get("cr_coef", 0.5)
-        self.lam: float = options_dict.get("lam", 0.9)
-        self.gamma: float = options_dict.get("gamma", 1.0)
+        self.lam: float = options_dict.get("lam", 0.95)
+        self.gamma: float = options_dict.get("gamma", 0.99)
         self.sep_val_model: bool = options_dict.get("sep_val_model", False)
         self.max_gen_tokens: int = options_dict.get("max_gen_tokens", DEFAULT_MAX_GEN_TOKENS.get(self.dataset, 400))
         self.beam_width: int = options_dict.get("beam_width", 1)
         self.pt_sample_freq: int = options_dict.get("pt_sample_freq", 0)
         self.deterministic: bool = options_dict.get("deterministic", True)
+        self.verbose: bool = options_dict.get("verbose", False)
 
     def as_dict(self):
         return self.__dict__

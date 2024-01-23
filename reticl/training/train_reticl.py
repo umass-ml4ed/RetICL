@@ -328,7 +328,7 @@ def train_reticl(dataset_config: DatasetConfig, train_split: str, dev_split: str
                     else:
                         _, value_estimates = retriever(**batch)
                 advantage = get_gae(value_estimates, rewards, options)
-                returns = advantage + value_estimates # Use TD(lambda) return as value function target
+                # returns = advantage + value_estimates # Use TD(lambda) return as value function target
 
                 for _ in range(options.inner_epochs):
                     idxs = list(range(batch_size * max_seq_len))

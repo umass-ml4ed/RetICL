@@ -118,6 +118,7 @@ def main():
     parser.add_argument("--pt_sample_freq", type=int, help="Number of prompts to collect per sample in pretraining data")
     parser.add_argument("--rseed", type=int, help="Random seed", default=221)
     parser.add_argument("--deterministic", type=bool_type, help="Use deterministic algorithms", default=True)
+    parser.add_argument("--verbose", type=bool_type, help="Print verbose output", default=False)
 
     args = parser.parse_args()
     arg_dict = {arg: val for arg, val in vars(args).items() if val is not None}
