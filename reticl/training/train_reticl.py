@@ -59,6 +59,7 @@ def get_rewards(batch: CollatedBatch, dataset_config: DatasetConfig, options: Tr
     elif options.reward == Reward.PPL.value:
         nlls = Generator.get_nll(**batch)
         rewards = 2 * torch.exp(-nlls) - 1
+        correct = torch.ones_like(rewards)
 
     return rewards, correct
 
@@ -457,7 +458,8 @@ def train_reticl(dataset_config: DatasetConfig, train_split: str, dev_split: str
                 for example_idx in batch["policy_example_indices"].view(-1):
                     val_example_set.add(example_idx.item())
 
-                _, rewards, correct = get_returns(batch, dataset_config, options)
+                _, rewards, _ = get_returns(batch, dataset_config, options)
+                _, correct = get_predictions(batch, dataset_config)
                 val_reward += rewards.detach().cpu().numpy().sum()
                 val_correct += correct.detach().cpu().numpy().sum()
                 val_num_examples += (batch["seq_len"] - 1).sum().item()

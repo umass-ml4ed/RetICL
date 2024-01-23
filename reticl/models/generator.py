@@ -227,6 +227,10 @@ class Generator:
                                 "nll": None
                             }
             torch.use_deterministic_algorithms(cls.options.deterministic, warn_only=True) # Set determinism back
+            if any([cls._cache[prompt]["nll"] is None for prompt in prompts]):
+                nlls = cls.get_nll(prompts, [cls._cache[prompt]["text"] for prompt in prompts])
+                for prompt, nll in zip(prompts, nlls):
+                    cls._cache[prompt]["nll"] = nll.item()
         return [cls._cache[prompt] for prompt in prompts]
 
 class GeneratorCM:
