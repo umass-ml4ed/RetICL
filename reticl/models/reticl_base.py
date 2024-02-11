@@ -15,7 +15,6 @@ class RetICLBase(nn.Module):
         self.use_bias = use_bias
         self.mask_prev_examples = mask_prev_examples
         self.emb_size = options.encoder_h or MODEL_TO_EMB_SIZE.get(options.encoder_model, 768)
-        self.dropout = nn.Dropout(options.dropout)
         self.bilinear = nn.Parameter(torch.empty((options.hidden_size, self.emb_size)))
         self.bias = nn.Parameter(torch.zeros((1)))
         if options.early_stopping:
@@ -103,7 +102,8 @@ class RetICLBase(nn.Module):
         return vfe[:, -1]
 
     def get_vfe(self, current_sample_encodings: torch.Tensor, example_encodings: torch.Tensor) -> torch.Tensor:
-        latent_states = self.get_latent_states(current_sample_encodings, self.dropout(example_encodings)) # (N x L x H)
+        latent_states = self.get_latent_states(
+            current_sample_encodings, example_encodings) # (N x L x H)
         return self.value_fn_estimator(latent_states).squeeze()
 
     def forward(self, current_sample_encodings: torch.Tensor, example_encodings: torch.Tensor,
@@ -112,7 +112,8 @@ class RetICLBase(nn.Module):
         batch_size, max_seq_len = example_encodings.shape[:2]
 
         # Get latent states, method depends on model type
-        latent_states = self.get_latent_states(current_sample_encodings, self.dropout(example_encodings)) # (N x L x H)
+        latent_states = self.get_latent_states(
+            current_sample_encodings, example_encodings) # (N x L x H)
         latent_states = latent_states[:, :-1] # Not using representation of terminal state
 
         # Get query vectors (first half of bilinear)

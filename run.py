@@ -73,6 +73,7 @@ def main():
     parser.add_argument("--wandb", action="store_true", help="Use Weights & Biases for logging")
     parser.add_argument("--lr", type=float, help="Learning rate")
     parser.add_argument("--wd", type=float, help="Weight decay")
+    parser.add_argument("--adam_eps", type=float, help="Adam optimizer epsilon")
     parser.add_argument("--grad_clip", type=float, help="Gradient clipping norm total value")
     parser.add_argument("--ppo_eps", type=float, help="Epsilon value for PPO objective clipping")
     parser.add_argument("--tau", type=float, help="Off-policy: annealing coefficient for Polyak updates on critic targets")
@@ -82,8 +83,10 @@ def main():
     parser.add_argument("--episodes_before_train", type=int, help="Off-policy: number of episodes to observe before training")
     parser.add_argument("--init", type=str, choices=[i.value for i in Init], help="Initialization method for model parameters")
     parser.add_argument("--lr_sched", type=str, choices=[lr.value for lr in LRSchedule], help="Learning rate schedule strategy")
-    parser.add_argument("--epochs", type=int, help="Number of epochs")
-    parser.add_argument("--batch_size", type=int, help="Number of episodes to observe per batch (equivalent to train batch size for on-policy)")
+    parser.add_argument("--epochs", type=int, help="Number of epochs over training data")
+    parser.add_argument("--inner_epochs", type=int, help="Number of inner epochs over each batch sampled from policy")
+    parser.add_argument("--batch_size", type=int, help="Number of episodes to observe per batch when sampling from policy")
+    parser.add_argument("--sub_batch_size", type=int, help="Batch size (in number of steps) for inner training loop")
     parser.add_argument("--grad_accum_steps", type=int, help="Number of gradient accumulation steps for encoder fine-tuning")
     parser.add_argument("--num_examples", type=int, help="Number of examples to include in the prompt")
     parser.add_argument("--train_size", type=int, help="Number of samples to use for training")
@@ -115,6 +118,7 @@ def main():
     parser.add_argument("--pt_sample_freq", type=int, help="Number of prompts to collect per sample in pretraining data")
     parser.add_argument("--rseed", type=int, help="Random seed", default=221)
     parser.add_argument("--deterministic", type=bool_type, help="Use deterministic algorithms", default=True)
+    parser.add_argument("--verbose", type=bool_type, help="Print verbose output", default=False)
 
     args = parser.parse_args()
     arg_dict = {arg: val for arg, val in vars(args).items() if val is not None}

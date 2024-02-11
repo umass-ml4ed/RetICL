@@ -123,7 +123,7 @@ class Generator:
     def get_nll(cls, prompts: List[str], labels: List[str], **kwargs):
         if cls._model_name == "gpt3":
             full_text = [prompt + label for prompt, label in zip(prompts, labels)]
-            results = gpt3_completion_with_batching(full_text, cls._gen_batch_size, cls._gpt3_model_name, max_tokens=0, logprobs=1, echo=True)
+            results = gpt3_completion_with_batching(full_text, cls._gen_batch_size, cls._gpt3_model_name, max_tokens=0, logprobs=1, echo=True, verbose=cls.options.verbose)
             nlls = []
             for result_idx, choice in enumerate(results):
                 # Find index in tokens where label begins and average per-token nlls thereafter
@@ -181,9 +181,9 @@ class Generator:
             if uncached_prompts:
                 use_chat = cls._gpt3_model_name in ("gpt-3.5-turbo", "gpt-4")
                 if use_chat:
-                    results = gpt3_completion_parallel(uncached_prompts, 1, cls._gpt3_model_name, cls.options.max_gen_tokens)
+                    results = gpt3_completion_parallel(uncached_prompts, 1, cls._gpt3_model_name, cls.options.max_gen_tokens, verbose=cls.options.verbose)
                 else:
-                    results = gpt3_completion_with_batching(uncached_prompts, cls._gen_batch_size, cls._gpt3_model_name, cls.options.max_gen_tokens, logprobs=1)
+                    results = gpt3_completion_with_batching(uncached_prompts, cls._gen_batch_size, cls._gpt3_model_name, cls.options.max_gen_tokens, logprobs=1, verbose=cls.options.verbose)
                 assert len(uncached_prompts) == len(results)
                 for prompt, result in zip(uncached_prompts, results):
                     if use_chat:

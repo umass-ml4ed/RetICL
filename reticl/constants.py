@@ -26,6 +26,7 @@ class RLAlgorithm(Enum):
     RWB = "rwb"
     AC = "ac"
     PPO = "ppo"
+    PPO_SIMPLE = "ppo_simple"
     DSAC = "dsac"
 
 class SamplingMethod(Enum):
