@@ -212,7 +212,7 @@ def train_reticl(dataset_config: DatasetConfig, train_split: str, dev_split: str
 
     print("Training...")
     # torch.autograd.set_detect_anomaly(True)
-    if options.rl_algo == RLAlgorithm.PPO.value:
+    if options.rl_algo in (RLAlgorithm.PPO.value, RLAlgorithm.PPO_SIMPLE.value):
         previous_model = retriever_model(options)
         previous_model.load_state_dict(retriever.state_dict())
     if options.rl_algo == RLAlgorithm.DSAC.value:
@@ -264,8 +264,8 @@ def train_reticl(dataset_config: DatasetConfig, train_split: str, dev_split: str
                 if len(replay_buffer) < options.episodes_before_train:
                     continue
 
-            # On-policy: get activations on current examples and value function estimates from retriever
-            if options.rl_algo != RLAlgorithm.DSAC.value and options.rl_algo != RLAlgorithm.PPO.value:
+            # For methods with no inner loop - get current example activations and value function estimates
+            if options.rl_algo not in (RLAlgorithm.DSAC.value, RLAlgorithm.PPO.value):
                 if options.sep_val_model:
                     activations, _ = retriever(**batch)
                     _, value_estimates = val_est_model(**batch)
@@ -310,6 +310,35 @@ def train_reticl(dataset_config: DatasetConfig, train_split: str, dev_split: str
                 # (r_t + v_(t+1) - v_t)^2 = ((r_t + v_(t+1) - v_t + v_t) - v_t)^2 = ((td_err + v_t) - v_t)^2
                 vf_loss = torch.nn.MSELoss(reduction="none")(value_estimates, td_error + value_estimates.detach())
                 loss = pg_loss + options.v_coef * vf_loss
+
+            elif options.rl_algo == RLAlgorithm.PPO_SIMPLE.value:
+                # Get policy ratio
+                with torch.no_grad():
+                    pi_old_activations, _ = previous_model(**batch)
+                cur_policy_probs = torch.softmax(activations, dim=-1)[
+                    torch.arange(batch_size * max_seq_len), batch["policy_example_indices"].view(-1)]
+                old_policy_probs = torch.softmax(pi_old_activations, dim=-1)[
+                    torch.arange(batch_size * max_seq_len), batch["policy_example_indices"].view(-1)]
+                ratio = cur_policy_probs / old_policy_probs
+                previous_model.load_state_dict(retriever.state_dict()) # Copy model for next iteration
+
+                # Get estimated advantage
+                advantage = get_gae(value_estimates, rewards, options)
+
+                # Get clip loss
+                clip_loss = -torch.min(ratio * advantage, torch.clip(ratio, 1 - options.ppo_eps, 1 + options.ppo_eps) * advantage)
+
+                # Get value function loss
+                vf_loss = torch.nn.MSELoss(reduction="none")(value_estimates, returns)
+
+                # Get final loss
+                if options.sep_val_model:
+                    loss = clip_loss
+                    vf_loss[loss_mask.view(-1)] = 0
+                    vf_loss = vf_loss.sum() / (~loss_mask).sum()
+                    vf_loss.backward()
+                else:
+                    loss = clip_loss + options.v_coef * vf_loss
 
             elif options.rl_algo == RLAlgorithm.PPO.value:
                 # Get previous action probabilities
@@ -462,8 +491,8 @@ def train_reticl(dataset_config: DatasetConfig, train_split: str, dev_split: str
             else:
                 raise Exception(f"Algorithm {options.rl_algo} not supported!")
 
-            # Do gradient step (DSAC has its own)
-            if options.rl_algo != RLAlgorithm.DSAC.value and options.rl_algo != RLAlgorithm.PPO.value:
+            # Do gradient step for methods without inner loops
+            if options.rl_algo not in (RLAlgorithm.DSAC.value, RLAlgorithm.PPO.value):
                 # Maximize entropy - encourages exploration by flattening action distribution
                 entropy = get_entropy(activations)
                 entropy = entropy[~ent_mask.view(-1)]
