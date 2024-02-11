@@ -67,5 +67,5 @@ DEFAULT_MAX_GEN_TOKENS = {
     Datasets.GSM8K.value: 400,
     Datasets.QASC.value: 150,
     Datasets.CQA.value: 100,
-    Datasets.AGNEWS.value: 50,
+    Datasets.AGNEWS.value: 10,
 }

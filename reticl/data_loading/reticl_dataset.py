@@ -329,7 +329,7 @@ class RetICLDataset(TorchDataset):
         if self.prompt_prefix:
             prompt += self.prompt_prefix + "\n\n"
         prompt += "\n\n".join([example["lm_context"] + example["lm_label"] for example in examples])
-        prompt += "\n\n" + cur_sample["lm_context"]
+        prompt += ("\n\n" if examples else "") + cur_sample["lm_context"]
 
         # Set retriever back to training mode if necessary
         if training:
