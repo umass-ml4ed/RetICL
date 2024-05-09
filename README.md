@@ -49,12 +49,12 @@ You can see all options by running `python3 run.py --help`. Default values can b
 
 Train:
 ```
-python3 run.py --train --rl_algo ppo --dataset gsm8k --model_name gsm8k_ppo --e_coef .1 --train_size 5000 --corpus_size 200 --soft_prompt_len 20 --val_size 500 --wandb
+python3 run.py --train --rl_algo ppo_simple --dataset gsm8k --model_name gsm8k_ppo --e_coef .1 --train_size 5000 --corpus_size 200 --soft_prompt_len 20 --val_size 500 --wandb
 ```
 
 Test:
 ```
-python3 run.py --eval test --rl_algo ppo --dataset gsm8k --model_name gsm8k_ppo --soft_prompt_len 20 --wandb
+python3 run.py --eval test --rl_algo ppo_simple --dataset gsm8k --model_name gsm8k_ppo --soft_prompt_len 20 --wandb
 ```
 
 Baselines:
