@@ -46,10 +46,10 @@ def math_load_data(split: str) -> List[dict]:
                 continue
             with open(f"{split_dir}/{topic_dir}/{problem_file}") as data_file:
                 sample = json.load(data_file)
-                # if sample["level"] not in ("Level 1", "Level 2", "Level 3"):
-                #     continue
-                # if "[asy]" in sample["solution"] or "[asy]" in sample["problem"]:
-                #     continue
+                if sample["level"] not in ("Level 1", "Level 2", "Level 3"):
+                    continue
+                if "[asy]" in sample["solution"] or "[asy]" in sample["problem"]:
+                    continue
                 solution, final_answer = extract_final_solution(sample["solution"])
                 sample["solution"] = solution
                 sample["final_answer"] = final_answer

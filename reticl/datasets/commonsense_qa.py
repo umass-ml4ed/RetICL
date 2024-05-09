@@ -43,13 +43,12 @@ def get_answer(sample: dict) -> str:
 
 def cqa_process_sample(sample: dict) -> DataSample:
     question = sample["question"]["stem"]
-    concept = sample["question"]["question_concept"]
     options = " ".join([choice["label"] + ") " + choice["text"] for choice in sample["question"]["choices"]])
     answer = get_answer(sample)
     return {
-        "lm_context": f"Question: {question}\nConcept: {concept}\nOptions: {options}\nAnswer:",
+        "lm_context": f"Question: {question}\nOptions: {options}\nAnswer:",
         "lm_label": f" {answer}",
-        "encoder_context": f"Question: {question}\nConcept: {concept}\nOptions: {options}",
+        "encoder_context": f"Question: {question}\nOptions: {options}",
         "encoder_label": f"\nAnswer: {answer}",
         "meta_data": sample,
     }

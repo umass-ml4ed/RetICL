@@ -22,6 +22,9 @@ class ICLSample(TypedDict):
     label: str
     output: Optional[GeneratorResult]
     meta_data: dict
+    # For rewards
+    sub_prompts: List[str]
+    example_similarity: torch.Tensor
     # For retriever
     current_sample_encoding: torch.Tensor
     example_encodings: torch.Tensor
@@ -35,6 +38,9 @@ class CollatedBatch(TypedDict):
     labels: List[str]
     outputs: Optional[List[GeneratorResult]]
     meta_data: List[dict]
+    # For rewards
+    sub_prompts: List[List[str]]
+    example_similarity: torch.Tensor
     # For retriever
     current_sample_encodings: torch.Tensor
     example_encodings: torch.Tensor
@@ -87,6 +93,25 @@ class RetICLDataset(TorchDataset):
 
         self.eos_idx = len(self.corpus)
 
+        if options.int_reward_sim:
+            print("Computing example similarity...")
+            if self.trainable_encoder:
+                similarity_encoder = SentenceTransformer(self.options.encoder_model or "all-distilroberta-v1")
+            else:
+                similarity_encoder = self.encoder
+            with torch.no_grad():
+                example_encodings = self._get_corpus_encodings(False, show_progress=True, encoder=similarity_encoder)
+            if id(self.corpus) == id(self.data):
+                self.example_sim_matrix = torch.matmul(example_encodings, example_encodings.T)
+                # Prevent calculating max similarity with self
+                self.example_sim_matrix[torch.eye(self.example_sim_matrix.shape[0]).bool()] = 0
+            else:
+                dataset_encodings = torch.stack([sample["context_encoding"] for sample in self.data]).to(device)
+                self.example_sim_matrix = torch.matmul(dataset_encodings, example_encodings.T)
+            max_sim = self.example_sim_matrix.max(dim=1, keepdim=True).values
+            min_sim = self.example_sim_matrix.min(dim=1, keepdim=True).values
+            self.example_sim_matrix = (self.example_sim_matrix - min_sim) / (max_sim - min_sim)
+
         if options.sm == SamplingMethod.COMPLEX.value:
             complexity_metric = dataset_config.get("complexity_metric", lambda sample: sample["lm_label"].count("\n"))
             corpus_complexity = np.array([-complexity_metric(sample) for sample in self.corpus])
@@ -94,7 +119,8 @@ class RetICLDataset(TorchDataset):
             min_complexity = corpus_complexity[sorted_idxs[options.num_examples]]
             self.complex_example_idxs = (corpus_complexity <= min_complexity).nonzero()[0].tolist()
 
-    def batch_encode(self, samples: List[DataSample], inc_label: bool, show_progress: bool = True):
+    def batch_encode(self, samples: List[DataSample], inc_label: bool, show_progress: bool = True, encoder = None):
+        encoder = encoder or self.encoder
         batch_size = 10
         it = range(0, len(samples), batch_size)
         if show_progress:
@@ -134,29 +160,29 @@ class RetICLDataset(TorchDataset):
                 else:
                     sample["context_encoding"] = encoding
 
-    def compute_corpus_encodings(self, show_progress: bool = True, cached_encoding_matrix: torch.Tensor = None):
+    def _get_corpus_encodings(self, inc_label: bool, show_progress: bool, encoder = None):
+        if inc_label:
+            self.batch_encode(self.corpus, True, show_progress=show_progress, encoder=encoder)
+            return torch.stack([sample["full_encoding"] for sample in self.corpus]).to(device)
+        if id(self.corpus) != id(self.data): # No need to re-encode context if corpus is same as data
+            self.batch_encode(self.corpus, False, show_progress=show_progress, encoder=encoder)
+        return torch.stack([sample["context_encoding"] for sample in self.corpus]).to(device)
+
+    def compute_corpus_encodings(self, inc_label: bool = True, show_progress: bool = True,
+                                 cached_encoding_matrix: torch.Tensor = None):
         if cached_encoding_matrix is not None:
             self.encoding_matrix = cached_encoding_matrix
         else:
-            self.batch_encode(self.corpus, True, show_progress)
-            self.encoding_matrix = torch.stack([sample["full_encoding"] for sample in self.corpus]).to(device)
+            self.encoding_matrix = self._get_corpus_encodings(inc_label, show_progress)
         self.emb_size = self.encoding_matrix.shape[1]
 
     def compute_encodings(self, cached_encoding_matrix: torch.Tensor = None):
         print("Encoding samples...")
         with torch.no_grad():
-            self.batch_encode(self.data, False)
-            if cached_encoding_matrix is not None:
-                self.encoding_matrix = cached_encoding_matrix
-            else:
-                if self.options.sm == SamplingMethod.SIMILARITY.value:
-                    if id(self.corpus) != id(self.data): # No need to re-encode context if corpus is same as data
-                        self.batch_encode(self.corpus, False)
-                    self.encoding_matrix = torch.stack([sample["context_encoding"] for sample in self.corpus]).to(device)
-                else:
-                    self.batch_encode(self.corpus, True)
-                    self.encoding_matrix = torch.stack([sample["full_encoding"] for sample in self.corpus]).to(device)
-        self.emb_size = self.encoding_matrix.shape[1]
+            self.batch_encode(self.data, False, show_progress=True)
+            self.compute_corpus_encodings(
+                inc_label=self.options.sm != SamplingMethod.SIMILARITY.value,
+                cached_encoding_matrix=cached_encoding_matrix)
 
         # Construct index for sample lookup
         if self.options.sm == SamplingMethod.SIMILARITY.value:
@@ -241,8 +267,10 @@ class RetICLDataset(TorchDataset):
             "example_idxs": [],
             "used_idxs": [index] if corp_eq_data else [],
             "example_encodings": torch.empty((0, self.emb_size)).to(device),
+            "score": 1.0,
             "prob": 1.0
         }]
+        # Keep going until all beams end with eos
         while not all(beam["example_idxs"] and beam["example_idxs"][-1] == self.eos_idx for beam in beams):
             beam_cands = []
             for beam in beams:
@@ -251,7 +279,6 @@ class RetICLDataset(TorchDataset):
                     continue
                 if len(beam["example_idxs"]) < self.options.num_examples:
                     if self.options.sm == SamplingMethod.VF.value:
-                        # TODO: if this is really slow then can cache previous states and pass to initial hidden state
                         activations = self.retriever.get_last_vfe(
                             current_sample_encodings=cur_sample["context_encoding"].repeat(self.encoding_matrix.shape[0], 1),
                             example_encodings=torch.cat([
@@ -267,18 +294,29 @@ class RetICLDataset(TorchDataset):
                             all_example_encodings=self.encoding_matrix,
                             used_idxs=beam["used_idxs"]
                         )
-                    pi_cur = torch.softmax(activations, dim=0)
                     example_idx_cands = torch.topk(activations, self.options.beam_width)[1].tolist()
+                    scores = self.retriever.get_last_vfe(
+                        current_sample_encodings=cur_sample["context_encoding"].repeat(self.options.beam_width, 1),
+                        example_encodings=torch.cat([
+                            beam["example_encodings"].unsqueeze(0).repeat(self.options.beam_width, 1, 1),
+                            self.encoding_matrix[example_idx_cands].unsqueeze(1)
+                        ], dim=1)
+                    )
+                    pi_cur = torch.softmax(activations, dim=0)
+                    probs = pi_cur[example_idx_cands].tolist()
                 else:
                     example_idx_cands = [self.eos_idx]
-                for example_idx in example_idx_cands:
+                    probs = [1.0]
+                for cand_idx, example_idx in enumerate(example_idx_cands):
+                    prob = probs[cand_idx] * beam["prob"]
                     if example_idx == self.eos_idx:
-                        score = beam["prob"] if self.options.sm == SamplingMethod.VF.value else 1
                         # TODO: if we want to do early stopping with vf, need to use learnable eos token embedding
-                        example_encoding = torch.zeros((self.emb_size,))
+                        example_encoding = torch.zeros((self.emb_size,)).to(device)
+                        # score = beam["score"] if self.options.sm == SamplingMethod.VF.value else 1
+                        score = beam["score"] # Keep score from last example
                     else:
-                        score = pi_cur[example_idx].item()
                         example_encoding = self.corpus[example_idx]["full_encoding"]
+                        score = scores[cand_idx]
                     new_example_encodings = torch.cat([
                         beam["example_encodings"],
                         example_encoding.unsqueeze(0).to(device)
@@ -287,10 +325,12 @@ class RetICLDataset(TorchDataset):
                         "example_idxs": beam["example_idxs"] + [example_idx],
                         "used_idxs": beam["used_idxs"] + [example_idx],
                         "example_encodings": new_example_encodings,
-                        "prob": score * (1 if self.options.sm == SamplingMethod.VF.value else beam["prob"])
+                        # "score": score * (1 if self.options.sm == SamplingMethod.VF.value else beam["score"])
+                        "score": score,
+                        "prob": prob
                     })
-            beams = sorted(beam_cands, key=lambda beam: -beam["prob"])[:self.options.beam_width]
-        top_beam = sorted(beams, key=lambda beam: -beam["prob"])[0]
+            beams = sorted(beam_cands, key=lambda beam: -beam["score"])[:self.options.beam_width]
+        top_beam = sorted(beams, key=lambda beam: -beam["score"])[0]
         return top_beam["example_idxs"], top_beam["example_encodings"]
 
     def __getitem__(self, index: int) -> ICLSample:
@@ -304,7 +344,7 @@ class RetICLDataset(TorchDataset):
 
         # Re-compute current sample encoding if using trainable encoder
         if self.trainable_encoder:
-            self.batch_encode([cur_sample], False, False)
+            self.batch_encode([cur_sample], False, show_progress=False)
 
         # Don't resample current sample if corpus and training set are the same
         corp_eq_data = id(self.corpus) == id(self.data)
@@ -323,13 +363,24 @@ class RetICLDataset(TorchDataset):
                 else:
                     example_idxs, example_encodings = self.get_policy_sampled_examples(index, cur_sample, corp_eq_data)
 
+        if self.options.int_reward_sim:
+            example_similarity = torch.stack([
+                self.example_sim_matrix[index, example_idx] for example_idx in example_idxs
+                if example_idx != self.eos_idx
+            ])
+        else:
+            example_similarity = None
+
         # Construct prompt
         examples = [self.corpus[example_idx] for example_idx in example_idxs if example_idx != self.eos_idx]
         prompt = ""
+        sub_prompts = []
         if self.prompt_prefix:
             prompt += self.prompt_prefix + "\n\n"
-        prompt += "\n\n".join([example["lm_context"] + example["lm_label"] for example in examples])
-        prompt += ("\n\n" if examples else "") + cur_sample["lm_context"]
+        for example in examples:
+            prompt += example["lm_context"] + example["lm_label"] + "\n\n"
+            sub_prompts.append(prompt + cur_sample["lm_context"])
+        prompt += cur_sample["lm_context"]
 
         # Set retriever back to training mode if necessary
         if training:
@@ -342,6 +393,8 @@ class RetICLDataset(TorchDataset):
             "prompt": prompt,
             "label": cur_sample["lm_label"],
             "meta_data": cur_sample["meta_data"],
+            "sub_prompts": sub_prompts,
+            "example_similarity": example_similarity,
             "current_sample_encoding": cur_sample.get("context_encoding"),
             "example_encodings": example_encodings,
             "policy_example_indices": example_idxs,
@@ -361,6 +414,11 @@ class Collator():
             "labels": [sample["label"] for sample in batch],
             "outputs": [sample["output"] for sample in batch] if batch[0].get("output") else None,
             "meta_data": [sample["meta_data"] for sample in batch],
+            "sub_prompts": [sample["sub_prompts"] for sample in batch],
+            "example_similarity": pad_sequence(
+                [sample["example_similarity"] for sample in batch],
+                batch_first=True
+            ).to(device) if batch[0]["example_similarity"] is not None else None,
             "current_sample_encodings": torch.stack(
                 [sample["current_sample_encoding"] for sample in batch]
             ).to(device) if batch[0]["current_sample_encoding"] is not None else None,
@@ -378,3 +436,11 @@ class Collator():
             ).to(device),
             "all_example_encodings": batch[0]["all_example_encodings"],
         }
+
+def filter_batch(batch: CollatedBatch, mask: torch.Tensor):
+    for key, value in batch.items():
+        if type(value) is list:
+            batch[key] = [value[i] for i, include in enumerate(mask) if include]
+        elif type(value) is torch.Tensor and key != "all_example_encodings":
+            batch[key] = value[mask]
+    return batch

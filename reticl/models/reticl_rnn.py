@@ -5,26 +5,25 @@ from reticl.models.reticl_base import RetICLBase
 from reticl.utils import TrainOptions, device, orthogonal_init_
 from reticl.constants import Init, ModelType
 
-CONCAT_ARCH = True
-
 class RetICLRNN(RetICLBase):
     def __init__(self, options: TrainOptions, use_bias: bool, mask_prev_examples: bool, num_critics: int):
         super().__init__(options, use_bias, mask_prev_examples, num_critics)
-        self.lstm = options.model_type == ModelType.LSTM.value
+        self.lstm = options.model_type.startswith(ModelType.LSTM.value)
+        self.concat = options.model_type == ModelType.LSTM_CONCAT.value
+        self.first = options.model_type == ModelType.LSTM_FIRST.value
         if self.lstm:
             self.rnn = nn.LSTM(self.emb_size, options.hidden_size, batch_first=True)
         else:
             self.rnn = nn.RNN(self.emb_size, options.hidden_size, batch_first=True)
-        if CONCAT_ARCH:
+        if self.concat:
             self.hidden_transform = nn.Sequential(
                 nn.Linear(self.emb_size + options.hidden_size, options.hidden_size),
                 nn.Dropout(options.dropout),
-                nn.ReLU(),
+                nn.Tanh(),
                 nn.Linear(options.hidden_size, options.hidden_size),
-                nn.Dropout(options.dropout),
-                nn.ReLU()
+                nn.Tanh()
             )
-        else:
+        elif not self.first:
             self.h_0_transform = nn.Sequential(
                 nn.Linear(self.emb_size, options.hidden_size),
                 nn.Dropout(options.dropout),
@@ -32,19 +31,22 @@ class RetICLRNN(RetICLBase):
             )
         if options.init == Init.ORTHOGONAL.value:
             orthogonal_init_(self.rnn)
-            if CONCAT_ARCH:
+            if self.concat:
                 orthogonal_init_(self.hidden_transform)
-            else:
+            elif not self.first:
                 orthogonal_init_(self.h_0_transform)
 
     def get_latent_states(self, current_sample_encodings: torch.Tensor, example_encodings: torch.Tensor, **kwargs):
-        if CONCAT_ARCH:
+        if self.first:
+            inputs = torch.concat([current_sample_encodings.unsqueeze(1), example_encodings], dim=1)
+            return self.rnn(inputs)[0]
+        if self.concat:
             h_0 = torch.zeros((current_sample_encodings.shape[0], self.options.hidden_size)).to(device)
         else:
             h_0 = self.h_0_transform(current_sample_encodings) # (N x H)
             if example_encodings.shape[1] == 0:
                 return h_0.unsqueeze(1)
-        if CONCAT_ARCH and example_encodings.shape[1] == 0:
+        if self.concat and example_encodings.shape[1] == 0:
             rnn_output = torch.zeros((current_sample_encodings.shape[0], 0, self.options.hidden_size)).to(device)
         else:
             if self.lstm:
@@ -54,7 +56,7 @@ class RetICLRNN(RetICLBase):
                 )
             else:
                 rnn_output, _ = self.rnn(example_encodings, h_0.unsqueeze(0))
-        if CONCAT_ARCH:
+        if self.concat:
             rnn_output = torch.concat([
                 torch.zeros((rnn_output.shape[0], 1, self.options.hidden_size)).to(device), rnn_output], dim=1)
             sub_latent_states = torch.concat([

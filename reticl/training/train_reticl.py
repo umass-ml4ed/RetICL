@@ -12,18 +12,22 @@ import nltk
 from reticl.models.retriever import retriever_model, Retriever
 from reticl.models.generator import Generator
 from reticl.data_loading.data_types import DatasetConfig
-from reticl.data_loading.reticl_dataset import RetICLDataset, Collator, CollatedBatch
+from reticl.data_loading.reticl_dataset import RetICLDataset, Collator, CollatedBatch, filter_batch
 from reticl.training.replay_buffer import ReplayBuffer
 from reticl.evaluate import evaluate_reticl
 from reticl.constants import SamplingMethod, RLAlgorithm, Reward, LRSchedule
 from reticl.utils import TrainOptions, device, is_pg
 
-def get_predictions(batch: CollatedBatch, dataset_config: DatasetConfig):
+def get_predictions(batch: CollatedBatch, dataset_config: DatasetConfig, step: int = None):
     # Generate predictions given retrieved context and check correctness
     if batch["outputs"] is not None:
         predictions = batch["outputs"]
     else:
-        predictions = Generator.generate(**batch)
+        if step is None:
+            prompts = batch["prompts"]
+        else:
+            prompts = [sub_prompts[step] for sub_prompts in batch["sub_prompts"]]
+        predictions = Generator.generate(prompts)
     if dataset_config.get("check_correct_batch"):
         correct = dataset_config["check_correct_batch"](
             batch["meta_data"], [pred["text"] for pred in predictions])
@@ -34,19 +38,20 @@ def get_predictions(batch: CollatedBatch, dataset_config: DatasetConfig):
         ])
     return predictions, correct
 
-def get_rewards(batch: CollatedBatch, dataset_config: DatasetConfig, options: TrainOptions):
+def get_rewards(batch: CollatedBatch, dataset_config: DatasetConfig, options: TrainOptions, anneal: float = 1.0, step: int = None):
     rewards = None
 
-    if options.reward in (Reward.EXACT.value, Reward.EXACT_AND_PPL.value, Reward.EXACT_AND_BLEU.value):
-        predictions, correct = get_predictions(batch, dataset_config)
+    if options.reward in (Reward.EXACT.value, Reward.CONF.value, Reward.EXACT_AND_BLEU.value):
+        predictions, correct = get_predictions(batch, dataset_config, step)
 
         if options.reward == Reward.EXACT.value:
             # Reward is 1 if prediction is correct, -1 otherwise
             rewards = 2 * correct - 1
 
-        elif options.reward == Reward.EXACT_AND_PPL.value:
+        elif options.reward == Reward.CONF.value:
             ppl = torch.tensor([-pred["nll"] for pred in predictions]).exp()
-            rewards = 2 * (correct * (1 - options.cr_coef) + ppl * options.cr_coef) - 1
+            cr_coef = options.cr_coef * anneal
+            rewards = 2 * (correct * (1 - cr_coef) + ppl * cr_coef) - 1
 
         elif options.reward == Reward.EXACT_AND_BLEU.value:
             # Calculate bleu score on the generated solutions
@@ -61,16 +66,28 @@ def get_rewards(batch: CollatedBatch, dataset_config: DatasetConfig, options: Tr
     elif options.reward == Reward.PPL.value:
         nlls = Generator.get_nll(**batch)
         rewards = 2 * torch.exp(-nlls) - 1
-        correct = torch.ones_like(rewards)
+        correct = None
 
     return rewards, correct
 
-def get_returns(batch: CollatedBatch, dataset_config: DatasetConfig, options: TrainOptions):
+def get_returns(batch: CollatedBatch, dataset_config: DatasetConfig, options: TrainOptions, anneal: float = 1.0, train: bool = False):
     # Calculate rewards and returns for batch - rewards given at eos actions
     batch_size, max_seq_len = batch["example_encodings"].shape[:2]
-    final_rewards, correct = get_rewards(batch, dataset_config, options) # (N)
+    final_rewards, correct = get_rewards(batch, dataset_config, options, anneal) # (N)
     rewards = torch.zeros((batch_size, max_seq_len), device=device) # (N x L)
     rewards[torch.arange(batch_size), batch["seq_len"] - 1] = final_rewards.to(device)
+    # Optionally prompt at each step to get intermediate rewards
+    if (train and options.int_reward_multi) or options.int_reward_sim:
+        sub_reward_coef = anneal / options.num_examples
+        for step in range(max_seq_len - 1):
+            sub_batch_mask = step < batch["seq_len"] - 1
+            sub_batch = filter_batch(batch, sub_batch_mask)
+            if train and options.int_reward_multi:
+                sub_rewards, _ = get_rewards(sub_batch, dataset_config, options, anneal, step)
+                rewards[sub_batch_mask, step] += sub_reward_coef * sub_rewards.to(device)
+            if options.int_reward_sim:
+                sim_rewards = 2 * sub_batch["example_similarity"][:, step] - 1
+                rewards[sub_batch_mask, step] += sub_reward_coef * sim_rewards
     returns = rewards.clone()
     for idx in range(max_seq_len - 2, -1, -1):
         returns[:, idx] += options.gamma * returns[:, idx + 1]
@@ -126,6 +143,102 @@ def get_optim(models: List[Retriever], options: TrainOptions, checkpoint = None)
 def polyak_update(source: torch.nn.Module, target: torch.nn.Module, tau: float):
     for source_param, target_param in zip(source.parameters(), target.parameters()):
         target_param.data.copy_(tau * source_param.data + (1 - tau) * target_param.data)
+
+def validation_loop(retriever: Retriever, best_model: Retriever, best_val_accuracy: float,
+                    val_set: RetICLDataset, val_loader: DataLoader, train_stats: dict,
+                    run, dataset_config: DatasetConfig, options: TrainOptions):
+    with torch.no_grad():
+        # Re-compute corpus encodings for validation set if training encoder
+        if retriever.encoder is not None:
+            val_set.compute_corpus_encodings()
+
+        # Get average reward on validation set
+        val_reward = 0
+        val_correct = 0
+        val_entropy = 0
+        val_num_examples = 0
+        val_example_set = set()
+        retriever.eval()
+        for batch in tqdm(val_loader):
+            for example_idx in batch["policy_example_indices"].view(-1):
+                val_example_set.add(example_idx.item())
+
+            _, rewards, _ = get_returns(batch, dataset_config, options, train_stats["supp_reward_anneal"])
+            _, correct = get_predictions(batch, dataset_config)
+            val_reward += rewards.detach().cpu().numpy().sum()
+            val_correct += correct.detach().cpu().numpy().sum()
+            val_num_examples += (batch["seq_len"] - 1).sum().item()
+
+            if is_pg(options):
+                batch_size, max_seq_len = batch["example_encodings"].shape[:2]
+                ent_mask = torch.arange(max_seq_len).expand(batch_size, -1) >= batch["seq_len"].unsqueeze(1)
+                if max_seq_len > options.num_examples:
+                    ent_mask[:, options.num_examples] = True
+                activations, _ = retriever(**batch)
+                val_entropy += get_entropy(activations)[~ent_mask.view(-1)].mean().item()
+
+    # Report stats on current epoch
+    avg_loss = np.mean(train_stats["losses"])
+    avg_reward = train_stats["total_reward"] / train_stats["train_size"]
+    avg_train_accuracy = train_stats["total_correct"] / train_stats["train_size"]
+    avg_val_reward = val_reward / len(val_set)
+    avg_val_accuracy = val_correct / len(val_set)
+    avg_num_examples = train_stats["train_num_examples"] / train_stats["train_size"]
+    avg_val_num_examples = val_num_examples / len(val_set)
+    avg_val_entropy = val_entropy / len(val_loader) if val_entropy else None
+    if run:
+        run.log({
+            "loss": avg_loss,
+            "vf_loss": np.mean(train_stats["vf_losses"]) if train_stats["vf_losses"] else None,
+            "reward": avg_reward,
+            "train_accuracy": avg_train_accuracy,
+            "val_reward": avg_val_reward,
+            "val_accuracy": avg_val_accuracy,
+            "train_examples_total": len(train_stats["train_example_set"]),
+            "train_examples_per": avg_num_examples,
+            "val_examples_total": len(val_example_set),
+            "val_examples_per": avg_val_num_examples,
+            "val_entropy": avg_val_entropy,
+            "lr": train_stats["cur_lr"],
+            "clip_fraction": np.mean(train_stats["clip_fractions"]) if train_stats["clip_fractions"] else None,
+        })
+    print(f"Epoch {train_stats['epoch'] + 1}, Loss: {avg_loss:.4f}, "
+            f"Reward: {avg_reward:.4f}, Val Reward: {avg_val_reward:.4f}, "
+            f"Train Acc: {avg_train_accuracy:.4f}, Val Acc: {avg_val_accuracy:.4f}, "
+            f"Train Examples: {len(train_stats['train_example_set'])}, Val Examples: {len(val_example_set)}")
+
+    # Save checkpoint
+    # Commented since not properly resuming
+    # torch.save({
+    #     "retriever": retriever.state_dict(),
+    #     "val_est": val_est_model.state_dict() if val_est_model is not None else None,
+    #     "optimizer": optimizer.state_dict(),
+    #     "rng_state": torch.random.get_rng_state(),
+    #     "epoch": epoch + 1,
+    # }, checkpoint_path)
+
+    # Save model with best reward on validation set
+    if best_val_accuracy is None or avg_val_accuracy > best_val_accuracy:
+        best_val_accuracy = avg_val_accuracy
+        print("Best! Saving model...")
+        best_model.load_state_dict(retriever.state_dict())
+        torch.save(best_model.state_dict(), f"{options.model_name}.pt")
+    return best_val_accuracy
+
+def reset_train_stats(epoch: int, cur_lr: float, supp_reward_anneal: float):
+    return {
+        "epoch": epoch,
+        "cur_lr": cur_lr,
+        "supp_reward_anneal": supp_reward_anneal,
+        "train_size": 0,
+        "total_reward": 0,
+        "total_correct": 0,
+        "train_num_examples": 0,
+        "train_example_set": set(),
+        "losses": [],
+        "vf_losses": [],
+        "clip_fractions": [],
+    }
 
 def train_reticl(dataset_config: DatasetConfig, train_split: str, dev_split: str, options_dict: dict):
     options = TrainOptions(options_dict)
@@ -224,14 +337,7 @@ def train_reticl(dataset_config: DatasetConfig, train_split: str, dev_split: str
         torch.random.set_rng_state(checkpoint["rng_state"].cpu())
     starting_epoch = 0 if checkpoint is None else checkpoint["epoch"]
     for epoch in range(starting_epoch, options.epochs):
-        total_reward = 0
-        train_num_examples = 0
-        train_example_set = set()
-        losses = []
-        vf_losses = []
-        clip_fractions = []
-
-        # Update exploration parameters
+        # Update hyperparameters
         cur_lr = optimizer.param_groups[0]["lr"]
         print("LR:", cur_lr)
         if options.sm == SamplingMethod.EPSILON_GREEDY.value:
@@ -240,21 +346,31 @@ def train_reticl(dataset_config: DatasetConfig, train_split: str, dev_split: str
         else:
             e_coef = options.e_coef * max(1 - (1 - options.expl_decay_rate) * epoch / options.epochs, 0)
             print("Entropy Coefficient:", e_coef)
+        # TODO: do annealing every step instead of every epoch
+        if options.anneal_reward:
+            supp_reward_anneal = 1 - epoch / options.epochs
+            print("Supplemental Reward Multiplier:", supp_reward_anneal)
+        else:
+            supp_reward_anneal = 1.0
 
         # Sample batch from dataset - example retrieval is also done here (__getitem__ in RetICLDataset)
-        retriever.train()
-        for raw_batch in tqdm(data_loader):
+        train_stats = reset_train_stats(epoch, cur_lr, supp_reward_anneal)
+        for batch_idx, raw_batch in enumerate(tqdm(data_loader)):
+            retriever.train()
             batch = collator(raw_batch)
             batch_size, max_seq_len = batch["example_encodings"].shape[:2]
+            train_stats["train_size"] += batch_size
 
             # Keep track of used examples
             for example_idx in batch["policy_example_indices"].view(-1):
-                train_example_set.add(example_idx.item())
-            train_num_examples += (batch["seq_len"] - 1).sum().item()
+                train_stats["train_example_set"].add(example_idx.item())
+            train_stats["train_num_examples"] += (batch["seq_len"] - 1).sum().item()
 
             # Get rewards and returns
-            returns, rewards, _ = get_returns(batch, dataset_config, options)
-            total_reward += rewards.detach().cpu().numpy().sum()
+            returns, rewards, correct = get_returns(batch, dataset_config, options, supp_reward_anneal, True)
+            train_stats["total_reward"] += rewards.sum().item()
+            if correct is not None:
+                train_stats["total_correct"] += correct.sum().item()
 
             # Off-policy: add to buffer
             if options.rl_algo == RLAlgorithm.DSAC.value:
@@ -358,11 +474,15 @@ def train_reticl(dataset_config: DatasetConfig, train_split: str, dev_split: str
                     else:
                         _, value_estimates = retriever(**batch)
                 advantage = get_gae(value_estimates, rewards, options)
+                # TODO: see if this helps or not
                 # returns = advantage + value_estimates # Use TD(lambda) return as value function target
 
+                # TODO: mess with hyperparams - batch size controls amount of exploration?
                 for _ in range(options.inner_epochs):
                     idxs = list(range(batch_size * max_seq_len))
                     random.shuffle(idxs)
+                    # TODO: try making sub-batches full sequences rather than individual indices
+                    # TODO: look into kl early stopping
                     for start_idx in range(0, len(idxs), options.sub_batch_size):
                         sub_batch_idxs = idxs[start_idx : start_idx + options.sub_batch_size]
                         if options.sep_val_model:
@@ -385,14 +505,14 @@ def train_reticl(dataset_config: DatasetConfig, train_split: str, dev_split: str
                             torch.clip(ratio, 1 - options.ppo_eps, 1 + options.ppo_eps) * sub_batch_advantage
                         )
                         clip_loss = clip_loss[~sub_batch_loss_mask].mean()
-                        clip_fractions.append((torch.abs(ratio - 1) > options.ppo_eps).float().mean().item())
+                        train_stats["clip_fractions"].append((torch.abs(ratio - 1) > options.ppo_eps).float().mean().item())
 
                         # Get value function loss
                         sub_batch_value_estimates = value_estimates[sub_batch_idxs]
                         sub_batch_returns = returns[sub_batch_idxs]
                         vf_loss = torch.nn.MSELoss(reduction="none")(sub_batch_value_estimates, sub_batch_returns)
                         vf_loss = vf_loss[~sub_batch_loss_mask].mean()
-                        vf_losses.append(vf_loss.item())
+                        train_stats["vf_losses"].append(vf_loss.item())
 
                         # Get final loss
                         if options.sep_val_model:
@@ -405,7 +525,7 @@ def train_reticl(dataset_config: DatasetConfig, train_split: str, dev_split: str
                         entropy = get_entropy(sub_batch_activations)
                         entropy = entropy[~sub_batch_ent_mask].mean()
                         loss = loss - e_coef * entropy
-                        losses.append(loss.item())
+                        train_stats["losses"].append(loss.item())
                         loss.backward()
                         torch.nn.utils.clip_grad_norm_(retriever_params, options.grad_clip)
                         optimizer.step()
@@ -464,7 +584,7 @@ def train_reticl(dataset_config: DatasetConfig, train_split: str, dev_split: str
                         else:
                             torch.nn.utils.clip_grad_norm_(retriever.parameters(), options.grad_clip)
                         critic_optims[critic_idx].step()
-                        vf_losses.append(loss.item())
+                        train_stats["vf_losses"].append(loss.item())
 
                     # Anneal targets towards critics using Polyak update
                     if options.sep_val_model:
@@ -488,7 +608,7 @@ def train_reticl(dataset_config: DatasetConfig, train_split: str, dev_split: str
                     actor_loss.backward()
                     torch.nn.utils.clip_grad_norm_(retriever_params, options.grad_clip)
                     optimizer.step()
-                    losses.append(actor_loss.item())
+                    train_stats["losses"].append(actor_loss.item())
             else:
                 raise Exception(f"Algorithm {options.rl_algo} not supported!")
 
@@ -499,17 +619,24 @@ def train_reticl(dataset_config: DatasetConfig, train_split: str, dev_split: str
                 entropy = entropy[~ent_mask.view(-1)]
                 loss = loss[~loss_mask.view(-1)]
                 loss = loss.mean() - e_coef * entropy.mean()
-                losses.append(loss.item())
+                train_stats["losses"].append(loss.item())
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(retriever_params, options.grad_clip)
                 optimizer.step()
                 optimizer.zero_grad()
                 if vf_loss is not None:
-                    vf_losses.append(vf_loss[~loss_mask.view(-1)].mean().item())
+                    train_stats["vf_losses"].append(vf_loss[~loss_mask.view(-1)].mean().item())
 
             # If training encoder, re-compute corpus encodings (after each training step)
             if retriever.encoder is not None:
-                dataset.compute_corpus_encodings(False)
+                dataset.compute_corpus_encodings(show_progress=False)
+
+            # Run validation loop, log stats, and save best model
+            if (options.val_every and (batch_idx + 1) % options.val_every == 0) or batch_idx == len(data_loader) - 1:
+                best_val_accuracy = validation_loop(
+                    retriever, best_model, best_val_accuracy, val_set, val_loader,
+                    train_stats, run, dataset_config, options)
+                train_stats = reset_train_stats(epoch, cur_lr, supp_reward_anneal)
 
         # Update learning rate schedulers
         if scheduler is not None:
@@ -517,81 +644,6 @@ def train_reticl(dataset_config: DatasetConfig, train_split: str, dev_split: str
             if options.rl_algo == RLAlgorithm.DSAC.value:
                 for critic_scheduler in critic_schedulers:
                     critic_scheduler.step()
-
-        with torch.no_grad():
-            # Re-compute corpus encodings for validation set if training encoder
-            if retriever.encoder is not None:
-                val_set.compute_corpus_encodings()
-
-            # Get average reward on validation set
-            val_reward = 0
-            val_correct = 0
-            val_entropy = 0
-            val_num_examples = 0
-            val_example_set = set()
-            retriever.eval()
-            for batch in tqdm(val_loader):
-                for example_idx in batch["policy_example_indices"].view(-1):
-                    val_example_set.add(example_idx.item())
-
-                _, rewards, _ = get_returns(batch, dataset_config, options)
-                _, correct = get_predictions(batch, dataset_config)
-                val_reward += rewards.detach().cpu().numpy().sum()
-                val_correct += correct.detach().cpu().numpy().sum()
-                val_num_examples += (batch["seq_len"] - 1).sum().item()
-
-                if is_pg(options):
-                    batch_size, max_seq_len = batch["example_encodings"].shape[:2]
-                    ent_mask = torch.arange(max_seq_len).expand(batch_size, -1) >= batch["seq_len"].unsqueeze(1)
-                    if max_seq_len > options.num_examples:
-                        ent_mask[:, options.num_examples] = True
-                    activations, _ = retriever(**batch)
-                    val_entropy += get_entropy(activations)[~ent_mask.view(-1)].mean().item()
-
-        # Report stats on current epoch
-        avg_loss = np.mean(losses)
-        avg_reward = total_reward / len(dataset)
-        avg_val_reward = val_reward / len(val_set)
-        avg_val_accuracy = val_correct and val_correct / len(val_set)
-        avg_num_examples = train_num_examples / len(dataset)
-        avg_val_num_examples = val_num_examples / len(val_set)
-        avg_val_entropy = val_entropy / len(val_loader) if val_entropy else None
-        if run:
-            run.log({
-                "loss": avg_loss,
-                "vf_loss": np.mean(vf_losses) if vf_losses else None,
-                "reward": avg_reward,
-                "val_reward": avg_val_reward,
-                "val_accuracy": avg_val_accuracy,
-                "train_examples_total": len(train_example_set),
-                "train_examples_per": avg_num_examples,
-                "val_examples_total": len(val_example_set),
-                "val_examples_per": avg_val_num_examples,
-                "val_entropy": avg_val_entropy,
-                "epsilon": dataset.epsilon if options.sm == SamplingMethod.EPSILON_GREEDY.value else None,
-                "alpha": alpha if options.rl_algo == RLAlgorithm.DSAC.value else None,
-                "lr": cur_lr,
-                "clip_fraction": np.mean(clip_fractions),
-            })
-        print(f"Epoch {epoch + 1}, Loss: {avg_loss:.4f}, Reward: {avg_reward:.4f}, Val Reward: {avg_val_reward:.4f}, "
-              f"Val Acc: {avg_val_accuracy:.4f}, Train Examples: {len(train_example_set)}, Val Examples: {len(val_example_set)}")
-
-        # Save checkpoint
-        # Commented since not properly resuming
-        # torch.save({
-        #     "retriever": retriever.state_dict(),
-        #     "val_est": val_est_model.state_dict() if val_est_model is not None else None,
-        #     "optimizer": optimizer.state_dict(),
-        #     "rng_state": torch.random.get_rng_state(),
-        #     "epoch": epoch + 1,
-        # }, checkpoint_path)
-
-        # Save model with best reward on validation set
-        if best_val_accuracy is None or avg_val_accuracy > best_val_accuracy:
-            best_val_accuracy = avg_val_accuracy
-            print("Best! Saving model...")
-            best_model.load_state_dict(retriever.state_dict())
-            torch.save(best_model.state_dict(), f"{options.model_name}.pt")
 
     # Save and evaluate final model
     final_model = best_model if options.save_best else retriever

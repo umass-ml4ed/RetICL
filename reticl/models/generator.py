@@ -4,7 +4,7 @@ import time
 from typing import Dict, List, TypedDict, Optional
 import torch
 import torch.nn.functional as F
-from transformers import AutoModelForCausalLM, AutoTokenizer, StoppingCriteria, PreTrainedTokenizerBase
+from transformers import AutoModelForCausalLM, AutoTokenizer, StoppingCriteria
 try:
     import deepspeed
 except ModuleNotFoundError:
@@ -23,22 +23,22 @@ def get_saved_cache(cache_filename: str):
             return json.load(cache_file)
     return {}
 
-def get_stopping_point(seq: torch.LongTensor, start: int, nl_token: int) -> Optional[int]:
+def get_stopping_point(seq: torch.LongTensor, start: int, sep_tokens: torch.Tensor) -> Optional[int]:
     return next(
-        (idx for idx in range(start, seq.shape[0] - 1)
-            if seq[idx] == nl_token and seq[idx + 1] == nl_token),
+        (idx for idx in range(start, seq.shape[0] - len(sep_tokens) + 1)
+            if torch.all(seq[idx : idx + len(sep_tokens)] == sep_tokens)),
         None
     )
 
 class NLStoppingCriteria(StoppingCriteria):
-    def __init__(self, nl_token: int, input_len: int):
-        self.nl_token = nl_token
+    def __init__(self, sep_tokens: torch.Tensor, input_len: int):
+        self.sep_tokens = sep_tokens
         self.input_len = input_len
 
     def __call__(self, input_ids: torch.LongTensor, _scores: torch.FloatTensor, **_kwargs) -> bool:
         # Check if two conginuous newlines exist in all sequences
         return all([
-            get_stopping_point(seq, self.input_len, self.nl_token) is not None
+            get_stopping_point(seq, self.input_len, self.sep_tokens) is not None
             for seq in input_ids
         ])
 
@@ -80,14 +80,17 @@ class Generator:
             start_time = time.time()
             # Load tokenizer and set newline token for double newline stopping criteria
             cls._tokenizer = AutoTokenizer.from_pretrained(cls._model_name)
-            if "llama" in cls._model_name:
-                cls._tokenizer.pad_token = cls._tokenizer.bos_token
-                cls._nl_token = 13
+            if "llama" in cls._model_name or "mistral" in cls._model_name:
+                cls._tokenizer.pad_token = cls._tokenizer.eos_token
+                cls._sep_tokens = torch.LongTensor([13, 13])
+            elif "gemma" in cls._model_name:
+                cls._sep_tokens = torch.LongTensor([109])
             elif "gpt" in cls._model_name:
                 cls._tokenizer.pad_token = cls._tokenizer.eos_token
-                cls._nl_token = cls._tokenizer("\n").input_ids[0]
+                cls._sep_tokens = torch.LongTensor([cls._tokenizer("\n").input_ids[0]] * 2)
             else:
                 raise NotImplementedError(f"Double newline tokenization not implemented for model {cls._model_name}")
+            cls._sep_tokens = cls._sep_tokens.to(device)
             # Load model
             cls._model = AutoModelForCausalLM.from_pretrained(
                 cls._model_name,
@@ -176,8 +179,8 @@ class Generator:
 
     @classmethod
     def generate(cls, prompts: List[str], **kwargs):
+        uncached_prompts = [prompt for prompt in prompts if prompt not in cls._cache]
         if cls._model_name == "gpt3":
-            uncached_prompts = [prompt for prompt in prompts if prompt not in cls._cache or isinstance(cls._cache[prompt], str)]
             if uncached_prompts:
                 use_chat = cls._gpt3_model_name in ("gpt-3.5-turbo", "gpt-4")
                 if use_chat:
@@ -200,7 +203,6 @@ class Generator:
             torch.use_deterministic_algorithms(False) # Don't use deterministic algorithms to speed up generation
             with torch.no_grad():
                 cls._tokenizer.padding_side = "left"
-                uncached_prompts = [prompt for prompt in prompts if prompt not in cls._cache or isinstance(cls._cache[prompt], str)]
                 if uncached_prompts:
                     for start_idx in range(0, len(uncached_prompts), cls._gen_batch_size):
                         batch = uncached_prompts[start_idx : start_idx + cls._gen_batch_size]
@@ -211,7 +213,7 @@ class Generator:
                         outputs = model.generate(
                             **inputs,
                             pad_token_id=cls._tokenizer.eos_token_id,
-                            stopping_criteria=[NLStoppingCriteria(cls._nl_token, inputs.input_ids.shape[1])],
+                            stopping_criteria=[NLStoppingCriteria(cls._sep_tokens, inputs.input_ids.shape[1])],
                             max_new_tokens=cls.options.max_gen_tokens,
                             do_sample=False,
                             return_dict_in_generate=True,
@@ -221,14 +223,17 @@ class Generator:
                         scores = torch.stack(outputs.scores, dim=1) # Scores are only for generated portion
                         for prompt, seq, score in zip(batch, sequences, scores):
                             # Trim sequence and logits after first double newline
-                            sp = get_stopping_point(seq, 0, cls._nl_token)
+                            sp = get_stopping_point(seq, 0, cls._sep_tokens)
                             if sp is not None:
                                 seq = seq[:sp]
                                 score = score[:sp]
                             # Get predicted text from tokens and nll from logits
                             pred = cls._tokenizer.decode(seq, skip_special_tokens=True)
-                            logps = F.log_softmax(score, dim=-1)
-                            nll = -logps[torch.arange(seq.shape[0]), seq].mean().item()
+                            if score.shape[0] == 0:
+                                nll = torch.inf
+                            else:
+                                logps = F.log_softmax(score, dim=-1)
+                                nll = -logps[torch.arange(seq.shape[0]), seq].mean().item()
                             cls._cache[prompt] = {
                                 "text": pred,
                                 "nll": nll

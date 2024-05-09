@@ -109,7 +109,7 @@ def pretrain_reticl(dataset_config: DatasetConfig, options_dict: dict):
 
             # If training encoder, re-compute corpus encodings (after each training step)
             if retriever.encoder is not None:
-                dataset.compute_corpus_encodings(False)
+                dataset.compute_corpus_encodings(show_progress=False)
 
         total_val_loss = 0
         total_val_correct = 0

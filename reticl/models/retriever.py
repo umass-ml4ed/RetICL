@@ -9,7 +9,7 @@ from reticl.utils import TrainOptions, device
 Retriever = Union[RetICLRNN, RetICLAttn, RetICLInd]
 
 def retriever_model(options: TrainOptions, use_bias: bool = False, mask_prev_examples: bool = True, num_critics: int = 0) -> Retriever:
-    if options.model_type in (ModelType.RNN.value, ModelType.LSTM.value):
+    if options.model_type == ModelType.RNN.value or options.model_type.startswith(ModelType.LSTM.value):
         return RetICLRNN(options, use_bias, mask_prev_examples, num_critics).to(device)
     if options.model_type == ModelType.ATTN.value:
         return RetICLAttn(options, use_bias, mask_prev_examples, num_critics).to(device)

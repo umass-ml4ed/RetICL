@@ -7,11 +7,15 @@ class Datasets(Enum):
     SVAMP = "svamp"
     QASC = "qasc"
     CQA = "cqa"
+    ECQA = "ecqa"
     AGNEWS = "agnews"
+    MTOP = "mtop"
 
 class ModelType(Enum):
     RNN = "rnn"
     LSTM = "lstm"
+    LSTM_FIRST = "lstm_first"
+    LSTM_CONCAT = "lstm_concat"
     ATTN = "attn"
     IND = "ind"
 
@@ -41,7 +45,7 @@ class SamplingMethod(Enum):
 class Reward(Enum):
     PPL = "ppl"
     EXACT = "exact"
-    EXACT_AND_PPL = "exact_and_ppl"
+    CONF = "conf"
     EXACT_AND_BLEU = "exact_and_bleu"
 
 class Pooling(Enum):
@@ -68,5 +72,8 @@ DEFAULT_MAX_GEN_TOKENS = {
     Datasets.GSM8K.value: 400,
     Datasets.QASC.value: 150,
     Datasets.CQA.value: 100,
+    Datasets.ECQA.value: 250,
     Datasets.AGNEWS.value: 10,
+    Datasets.MTOP.value: 200,
+    Datasets.SVAMP.value: 50,
 }

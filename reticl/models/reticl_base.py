@@ -17,10 +17,11 @@ class RetICLBase(nn.Module):
         self.emb_size = options.encoder_h or MODEL_TO_EMB_SIZE.get(options.encoder_model, 768)
         self.bilinear = nn.Parameter(torch.empty((options.hidden_size, self.emb_size)))
         self.bias = nn.Parameter(torch.zeros((1)))
+        self.dropout = nn.Dropout(options.dropout)
         if options.early_stopping:
             self.early_stop_proj = nn.Linear(options.hidden_size, 1, bias=True)
             # Ensure that at initialization early stopping action has high probability relative to all examples
-            # nn.init.constant_(self.early_stop_proj.bias, options.corpus_size * .02)
+            nn.init.constant_(self.early_stop_proj.bias, 1)
         self.num_critics = num_critics
         if num_critics == 0:
             self.value_fn_estimator = nn.Linear(options.hidden_size, 1)
@@ -104,7 +105,7 @@ class RetICLBase(nn.Module):
     def get_vfe(self, current_sample_encodings: torch.Tensor, example_encodings: torch.Tensor) -> torch.Tensor:
         latent_states = self.get_latent_states(
             current_sample_encodings, example_encodings) # (N x L x H)
-        return self.value_fn_estimator(latent_states).squeeze()
+        return self.value_fn_estimator(latent_states).squeeze(2)
 
     def forward(self, current_sample_encodings: torch.Tensor, example_encodings: torch.Tensor,
                 policy_example_indices: torch.Tensor, all_example_encodings: torch.Tensor,
@@ -115,6 +116,7 @@ class RetICLBase(nn.Module):
         latent_states = self.get_latent_states(
             current_sample_encodings, example_encodings) # (N x L x H)
         latent_states = latent_states[:, :-1] # Not using representation of terminal state
+        latent_states = self.dropout(latent_states)
 
         # Get query vectors (first half of bilinear)
         query_vectors = torch.matmul(latent_states, self.bilinear) # (N x L x E)

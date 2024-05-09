@@ -29,7 +29,7 @@ class TrainOptions:
         self.model_type: str = options_dict.get("model_type", ModelType.LSTM.value)
         self.model_name: Optional[str] = options_dict.get("model_name", None)
         self.pt_model_name: Optional[str] = options_dict.get("pt_model_name", None)
-        self.generator_model: str = options_dict.get("generator_model", "gpt3")
+        self.generator_model: str = options_dict.get("generator_model", "mistralai/Mistral-7B-v0.1")
         self.gpt3_model: str = options_dict.get("gpt3_model", "code-davinci-002")
         self.gen_batch_size: int = options_dict.get("gen_batch_size", 0)
         self.encoder_model_type: str = options_dict.get("encoder_model_type", EncoderModelType.SBERT.value)
@@ -43,6 +43,7 @@ class TrainOptions:
         self.corpus_size: int = options_dict.get("corpus_size", 0)
         self.val_size: int = options_dict.get("val_size", 0)
         self.val_corpus_size: int = options_dict.get("val_corpus_size", 0)
+        self.val_every: int = options_dict.get("val_every", 0)
         self.save_best: bool = options_dict.get("save_best", True)
         self.wandb: bool = options_dict.get("wandb", False)
         self.lr: float = options_dict.get("lr", 1e-3)
@@ -66,12 +67,15 @@ class TrainOptions:
         self.eg_eps: float = options_dict.get("eg_eps", 0.5)
         self.expl_decay_rate: float = options_dict.get("expl_decay_rate", 1.0)
         self.top_k: int = options_dict.get("top_k", 0)
-        self.reward: str = options_dict.get("reward", Reward.EXACT_AND_PPL.value)
+        self.reward: str = options_dict.get("reward", Reward.CONF.value)
+        self.int_reward_multi: bool = options_dict.get("int_reward_multi", False)
+        self.int_reward_sim: bool = options_dict.get("int_reward_sim", False)
         self.hidden_size: int = options_dict.get("hidden_size", 800)
         self.dropout: float = options_dict.get("dropout", 0.0)
         self.v_coef: float = options_dict.get("v_coef", 0.5)
         self.e_coef: float = options_dict.get("e_coef", 0.0)
         self.cr_coef: float = options_dict.get("cr_coef", 0.5)
+        self.anneal_reward: bool = options_dict.get("anneal_reward", False)
         self.lam: float = options_dict.get("lam", 0.95)
         self.gamma: float = options_dict.get("gamma", 0.99)
         self.sep_val_model: bool = options_dict.get("sep_val_model", False)
@@ -88,7 +92,7 @@ class TrainOptions:
         self.__dict__.update(options_dict)
 
 def is_pg(options: TrainOptions):
-    return options.rl_algo in (RLAlgorithm.REINFORCE.value, RLAlgorithm.RWB.value, RLAlgorithm.AC.value, RLAlgorithm.PPO.value, RLAlgorithm.DSAC.value)
+    return options.rl_algo in (RLAlgorithm.REINFORCE.value, RLAlgorithm.RWB.value, RLAlgorithm.AC.value, RLAlgorithm.PPO.value, RLAlgorithm.PPO_SIMPLE.value, RLAlgorithm.DSAC.value)
 
 def max_sbert_len(model_name: str):
     if "all-mpnet-base-v2" in model_name:
