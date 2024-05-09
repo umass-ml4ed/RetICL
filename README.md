@@ -1,5 +1,18 @@
 # RetICL
-RetICL (Retrieval for In-Context Learning) is a reinforcement learning-based method for the joint retrieval of in-context learning examples. The primary component is a recurrent neural network that jointly represents a problem and a group of examples, along with a bilinear activation that ranks subsequent examples.
+[RetICL (Retrieval for In-Context Learning)](https://arxiv.org/abs/2305.14502) is a reinforcement learning-based method for the joint retrieval of in-context learning examples. The primary component is a recurrent neural network that jointly represents a problem and a group of examples, along with a bilinear activation that ranks subsequent examples. We also introduce a confidence-based reward where the perplexity of the generated solution is used as a proxy for the quality of the reasoning.
+
+## Citation
+If you found this code or these ideas useful, please cite our paper!
+```
+@misc{scarlatos2024reticl,
+      title={RetICL: Sequential Retrieval of In-Context Examples with Reinforcement Learning}, 
+      author={Alexander Scarlatos and Andrew Lan},
+      year={2024},
+      eprint={2305.14502},
+      archivePrefix={arXiv},
+      primaryClass={cs.CL}
+}
+```
 
 ## Setup
 
